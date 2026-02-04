@@ -2,8 +2,6 @@
 
 <div align="center">
 
-![IRIS](PhishGuard.jpg)
-
 **Containerized URL analysis platform for phishing detection and threat assessment.**
 
 [![Docker Image](https://img.shields.io/badge/ghcr.io-fredzirbel%2Firis-blue?logo=docker)](https://ghcr.io/fredzirbel/iris)

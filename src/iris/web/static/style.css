@@ -60,13 +60,6 @@ a:hover { color: var(--accent-hover); }
     color: var(--accent);
 }
 
-.nav-logo {
-    height: 32px;
-    width: 32px;
-    object-fit: contain;
-    border-radius: 4px;
-}
-
 .nav-tagline {
     color: var(--text-muted);
     font-size: 0.85rem;

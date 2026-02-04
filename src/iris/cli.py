@@ -1,0 +1,79 @@
+"""CLI entry point for IRIS."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import warnings
+from pathlib import Path
+
+from iris import __version__
+from iris.config import load_config
+from iris.output import render_report
+from iris.scanner import scan_url
+
+
+def main() -> None:
+    """Parse CLI arguments and run an IRIS scan."""
+    parser = argparse.ArgumentParser(
+        prog="iris",
+        description="IRIS - Intelligent Risk Inspection System",
+    )
+    parser.add_argument("url", metavar="URL", help="The URL to analyze")
+    parser.add_argument(
+        "-c", "--config",
+        default=None,
+        help="Path to config YAML file (default: config/default.yaml)",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Show detailed findings for each analyzer",
+    )
+    parser.add_argument(
+        "--no-active",
+        action="store_true",
+        help="Skip active checks (HTTP fetch, page content) - passive only",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored output",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+
+    args = parser.parse_args()
+
+    # Validate URL has a scheme
+    url = args.url
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    try:
+        config = load_config(args.config)
+    except Exception as e:
+        print(f"Error loading config: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.no_color:
+        from iris.output import console
+        console.no_color = True
+
+    # Suppress SSL verification warnings since we intentionally disable it for analysis
+    warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+
+    # Set up screenshots directory
+    project_root = Path(__file__).resolve().parent.parent.parent
+    screenshot_dir = project_root / "screenshots"
+    screenshot_dir.mkdir(exist_ok=True)
+
+    report = scan_url(url, config, passive_only=args.no_active, screenshot_dir=str(screenshot_dir))
+    render_report(report, verbose=args.verbose)
+
+
+if __name__ == "__main__":
+    main()

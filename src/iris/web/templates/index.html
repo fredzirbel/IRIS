@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}IRIS &mdash; Scan a URL{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <h1>Scan a URL</h1>
+    <p>Paste a URL below to analyze it across multiple security dimensions.</p>
+
+    <form action="/scan" method="post" class="scan-form" id="scanForm">
+        <input
+            type="text"
+            name="url"
+            placeholder="https://example.com"
+            required
+            autocomplete="off"
+            class="url-input"
+        >
+        <button type="submit" class="btn btn-primary" id="scanBtn">Scan</button>
+    </form>
+
+    <div class="spinner" id="spinner" style="display:none;">
+        <div class="spinner-ring"></div>
+        <p>Scanning&hellip; this may take a moment.</p>
+    </div>
+</section>
+
+{% if recent_scans %}
+<section class="recent">
+    <h2>Recent Scans</h2>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>URL</th>
+                <th>Risk</th>
+                <th>Score</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in recent_scans %}
+            <tr>
+                <td class="url-cell">{{ entry.report.url }}</td>
+                <td>
+                    <span class="badge badge-{{ entry.report.risk_category.name | lower }}">
+                        {{ entry.report.risk_category.value }}
+                    </span>
+                </td>
+                <td>{{ "%.1f" | format(entry.report.overall_score) }}</td>
+                <td><a href="/results/{{ entry.scan_id }}" class="btn btn-sm">View</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endif %}
+
+<script>
+    const urlInput = document.querySelector(".url-input");
+    urlInput.addEventListener("paste", function () {
+        requestAnimationFrame(function () { urlInput.value = urlInput.value.trim(); });
+    });
+    document.getElementById("scanForm").addEventListener("submit", function (e) {
+        e.preventDefault();
+        const url = urlInput.value.trim();
+        if (!url) return;
+
+        document.getElementById("scanBtn").disabled = true;
+        document.getElementById("spinner").style.display = "flex";
+
+        fetch("/api/scan", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({url: url}),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.scan_id) {
+                window.location.href = "/results/" + data.scan_id + "?stream=1";
+            } else {
+                alert(data.error || "Scan failed");
+                document.getElementById("scanBtn").disabled = false;
+                document.getElementById("spinner").style.display = "none";
+            }
+        })
+        .catch(function (err) {
+            alert("Request failed: " + err.message);
+            document.getElementById("scanBtn").disabled = false;
+            document.getElementById("spinner").style.display = "none";
+        });
+    });
+</script>
+{% endblock %}

@@ -1,0 +1,104 @@
+# IRIS Configuration
+# Copy this file to config/local.yaml and fill in your API keys.
+
+api_keys:
+  virustotal: ""
+  google_safebrowsing: ""
+  abuseipdb: ""
+
+scoring:
+  weights:
+    url_lexical: 20
+    whois_dns: 15
+    ssl_tls: 15
+    http_response: 15
+    page_content: 15
+    threat_feeds: 20
+  thresholds:
+    safe: 15
+    suspicious: 35
+    likely_phishing: 55
+
+requests:
+  timeout: 10
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  max_redirects: 10
+  verify_ssl: false
+
+brands:
+  - google.com
+  - microsoft.com
+  - apple.com
+  - paypal.com
+  - amazon.com
+  - facebook.com
+  - netflix.com
+  - chase.com
+  - bankofamerica.com
+  - wellsfargo.com
+  - dropbox.com
+  - linkedin.com
+  - instagram.com
+  - twitter.com
+  - github.com
+  - midjourney.com
+
+url_shorteners:
+  - bit.ly
+  - tinyurl.com
+  - t.co
+  - goo.gl
+  - ow.ly
+  - is.gd
+  - buff.ly
+  - rebrand.ly
+
+suspicious_tlds:
+  - .xyz
+  - .top
+  - .club
+  - .work
+  - .click
+  - .loan
+  - .racing
+  - .win
+  - .gq
+  - .ml
+  - .cf
+  - .tk
+  - .ga
+
+abused_hosting_domains:
+  - cdn.jsdelivr.net
+  - raw.githubusercontent.com
+  - githubusercontent.com
+  - pages.dev
+  - workers.dev
+  - netlify.app
+  - vercel.app
+  - web.app
+  - firebaseapp.com
+  - onrender.com
+  - gitbook.io
+  - s3.amazonaws.com
+  - blob.core.windows.net
+  - storage.googleapis.com
+
+suspicious_extensions:
+  - .exe
+  - .msi
+  - .bat
+  - .cmd
+  - .ps1
+  - .vbs
+  - .js
+  - .hta
+  - .scr
+  - .dll
+  - .lnk
+  - .iso
+  - .img
+  - .wsf
+  - .zip
+  - .rar
+  - .7z

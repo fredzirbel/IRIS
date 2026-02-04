@@ -1,0 +1,808 @@
+{% extends "base.html" %}
+
+{% block title %}IRIS &mdash; Results{% endblock %}
+
+{% block content %}
+
+{% if streaming %}
+{# ================================================================
+   STREAMING MODE — skeleton page + SSE progressive rendering
+   ================================================================ #}
+
+<!-- Score Banner (loading state) -->
+<section class="score-banner score-pending" id="score-banner">
+    <div class="score-value" id="score-value">
+        <div class="spinner-ring-sm"></div>
+    </div>
+    <div class="score-label" id="score-label">Scanning&hellip;</div>
+    <div class="score-url" id="score-url"></div>
+</section>
+
+<!-- Recommendation (hidden until score arrives) -->
+<section class="recommendation rec-pending" id="recommendation" style="display:none;">
+    <p id="recommendation-text"></p>
+</section>
+
+<!-- Screenshot -->
+<section class="card" id="section-screenshot">
+    <details open>
+        <summary class="section-toggle">Page Screenshot</summary>
+        <div class="section-body" id="screenshot-body">
+            <div class="skeleton-loading">Capturing screenshot&hellip;</div>
+        </div>
+    </details>
+</section>
+
+<!-- URL Threat Feed Results (hidden until data) -->
+<section class="card" id="section-feeds" style="display:none;">
+    <details open>
+        <summary class="section-toggle">URL Threat Feed Results</summary>
+        <div class="section-body" id="feeds-body"></div>
+    </details>
+</section>
+
+<!-- File Download Analysis (hidden until data) -->
+<section class="card" id="section-download" style="display:none;">
+    <details open>
+        <summary class="section-toggle">File Download Analysis</summary>
+        <div class="section-body" id="download-body"></div>
+    </details>
+</section>
+
+<!-- Link Discovery (hidden until data) -->
+<section class="card" id="section-links" style="display:none;">
+    <details open>
+        <summary class="section-toggle">Link Discovery</summary>
+        <div class="section-body" id="links-body"></div>
+    </details>
+</section>
+
+<!-- OSINT Links (hidden until data) -->
+<section class="card" id="section-osint" style="display:none;">
+    <details open>
+        <summary class="section-toggle">OSINT Links</summary>
+        <div class="section-body" id="osint-body"></div>
+    </details>
+</section>
+
+<!-- Analyzer Breakdown -->
+<section class="card" id="section-analyzers">
+    <details open>
+        <summary class="section-toggle">Analyzer Breakdown</summary>
+        <div class="section-body">
+            <table class="table table--fixed">
+                <colgroup>
+                    <col style="width:55%">
+                    <col style="width:15%">
+                    <col style="width:15%">
+                    <col style="width:15%">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>Analyzer</th>
+                        <th>Status</th>
+                        <th>Score</th>
+                        <th>Weight</th>
+                    </tr>
+                </thead>
+                <tbody id="analyzer-tbody">
+                    <!-- Rows added dynamically by SSE -->
+                </tbody>
+            </table>
+            <div class="skeleton-loading" id="analyzers-loading">Running analyzers&hellip;</div>
+        </div>
+    </details>
+</section>
+
+<!-- Redirect Chain (hidden until data) -->
+<section class="card" id="section-redirect" style="display:none;">
+    <details open>
+        <summary class="section-toggle">Redirect Chain</summary>
+        <div class="section-body" id="redirect-body"></div>
+    </details>
+</section>
+
+<!-- Scan Metadata -->
+<section class="card" id="section-metadata">
+    <details>
+        <summary class="section-toggle">Scan Metadata</summary>
+        <div class="section-body meta-content" id="metadata-content">
+            <div class="skeleton-loading">Loading&hellip;</div>
+        </div>
+    </details>
+</section>
+
+<div class="actions">
+    <a href="/" class="btn btn-primary">New Scan</a>
+</div>
+
+<script>
+(function () {
+    "use strict";
+
+    var scanId = "{{ scan_id }}";
+    var es = new EventSource("/stream/" + scanId);
+
+    /* ---- Helper: escape HTML entities ---- */
+    function esc(s) {
+        var el = document.createElement("span");
+        el.textContent = s || "";
+        return el.innerHTML;
+    }
+
+    /* ---- already_complete: redirect to static results ---- */
+    es.addEventListener("already_complete", function () {
+        es.close();
+        window.location.href = "/results/" + scanId;
+    });
+
+    /* ---- metadata ---- */
+    es.addEventListener("metadata", function (e) {
+        var d = JSON.parse(e.data);
+        document.getElementById("score-url").textContent = d.url || "";
+        var html = "<p><strong>Scan ID:</strong> " + esc(d.scan_id) + "</p>" +
+            "<p><strong>Domain:</strong> " + esc(d.domain) + "</p>" +
+            (d.ip ? "<p><strong>Resolved IP:</strong> " + esc(d.ip) + "</p>" : "");
+        document.getElementById("metadata-content").innerHTML = html;
+    });
+
+    /* ---- osint ---- */
+    es.addEventListener("osint", function (e) {
+        var d = JSON.parse(e.data);
+        if (d.links && d.links.length) {
+            document.getElementById("section-osint").style.display = "";
+            var html = '<div class="osint-grid">';
+            d.links.forEach(function (link) {
+                html += '<a href="' + esc(link.url) + '" target="_blank" rel="noopener noreferrer"' +
+                    ' class="osint-link osint-' + esc(link.icon_class) + '">' +
+                    '<span class="osint-name">' + esc(link.name) + '</span>' +
+                    '<span class="osint-desc">' + esc(link.description) + '</span></a>';
+            });
+            html += '</div>';
+            document.getElementById("osint-body").innerHTML = html;
+        }
+    });
+
+    /* ---- analyzer ---- */
+    es.addEventListener("analyzer", function (e) {
+        var d = JSON.parse(e.data);
+        var r = d.result;
+        var loadingEl = document.getElementById("analyzers-loading");
+        if (loadingEl) loadingEl.remove();
+
+        var tbody = document.getElementById("analyzer-tbody");
+        var tr = document.createElement("tr");
+
+        /* Build findings list (sorted: critical → info) */
+        var sevOrder = {critical: 0, high: 1, medium: 2, low: 3, info: 4};
+        var findingsHtml = "";
+        if (r.findings && r.findings.length) {
+            var sorted = r.findings.slice().sort(function (a, b) {
+                return (sevOrder[a.severity] || 5) - (sevOrder[b.severity] || 5);
+            });
+            findingsHtml = '<ul class="findings-list">';
+            sorted.forEach(function (f) {
+                findingsHtml += '<li onclick="this.classList.toggle(\'expanded\')"><span class="severity severity-' + esc(f.severity) + '">' +
+                    esc(f.severity) + '</span> ' + esc(f.description) +
+                    ' (+' + Math.round(f.score_contribution) + ')</li>';
+            });
+            findingsHtml += '</ul>';
+        } else if (r.error_message) {
+            findingsHtml = '<p class="error-message">' + esc(r.error_message) + '</p>';
+        } else {
+            findingsHtml = '<p class="muted">No findings.</p>';
+        }
+
+        tr.innerHTML =
+            '<td><details><summary>' + esc(r.analyzer_name) + '</summary>' + findingsHtml + '</details></td>' +
+            '<td><span class="badge badge-status-' + esc(r.status.toLowerCase()) + '">' + esc(r.status) + '</span></td>' +
+            '<td>' + r.score.toFixed(1) + '</td>' +
+            '<td>' + Math.round(r.max_weight) + '</td>';
+        tbody.appendChild(tr);
+
+        /* If this is Link Discovery, also render the discovered links section */
+        if (r.analyzer_name === "Link Discovery Analysis" && r.findings) {
+            /* Link discovery data comes via a separate event — handled below */
+        }
+    });
+
+    /* ---- screenshot ---- */
+    es.addEventListener("screenshot", function (e) {
+        var d = JSON.parse(e.data);
+        var body = document.getElementById("screenshot-body");
+        if (d.filename) {
+            body.innerHTML = '<div class="screenshot-wrapper">' +
+                '<img src="/screenshots/' + esc(d.filename) + '" alt="Screenshot" class="screenshot-img">' +
+                '</div>';
+        } else {
+            body.innerHTML = '<div class="screenshot-unavailable">' +
+                '<div class="screenshot-unavailable-icon">&#128247;</div>' +
+                '<p>Screenshot unavailable</p>' +
+                '<p class="muted">The site blocked the capture or the connection timed out.</p></div>';
+        }
+    });
+
+    /* ---- feed_results ---- */
+    es.addEventListener("feed_results", function (e) {
+        var d = JSON.parse(e.data);
+        if (!d.feeds || !d.feeds.length) return;
+        document.getElementById("section-feeds").style.display = "";
+
+        /* Sort: matched first, then by display_order */
+        var feeds = d.feeds.slice().sort(function (a, b) {
+            if (b.matched !== a.matched) return b.matched ? 1 : -1;
+            return (a.display_order || 99) - (b.display_order || 99);
+        });
+
+        var html = '<table class="table"><thead><tr><th>Feed</th><th>Match</th><th>Details</th></tr></thead><tbody>';
+        feeds.forEach(function (f) {
+            var cls = f.matched ? ' class="feed-match"' : '';
+            var badge = f.matched
+                ? '<span class="badge badge-confirmed_phishing">MATCH</span>'
+                : '<span class="badge badge-status-skipped">Not Found</span>';
+            html += '<tr' + cls + '><td>' + esc(f.feed_name) + '</td><td>' + badge + '</td>' +
+                '<td>' + esc(f.details || "\u2014") + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        document.getElementById("feeds-body").innerHTML = html;
+    });
+
+    /* ---- file_download ---- */
+    es.addEventListener("file_download", function (e) {
+        var d = JSON.parse(e.data);
+        if (!d.info || !d.info.detected) return;
+        var info = d.info;
+        document.getElementById("section-download").style.display = "";
+
+        var html = '<div class="file-dl-stack">';
+        /* Filename */
+        html += '<div class="file-dl-filename">';
+        if (info.filename) {
+            html += '<span class="file-dl-filename-label">File name:</span> ' + esc(info.filename);
+        } else {
+            html += '<span class="muted" style="font-weight:400;">Unknown filename</span>';
+        }
+        if (info.extension) {
+            html += ' <span class="flag flag-warning">' + esc(info.extension) + '</span>';
+        }
+        html += '</div>';
+
+        /* Hash + VT */
+        html += '<div class="file-dl-details">';
+        html += '<div class="file-dl-row"><span class="file-dl-key">SHA-256</span><span class="file-dl-val">';
+        if (info.sha256) {
+            html += '<code class="hash-value">' + esc(info.sha256) + '</code>';
+        } else {
+            html += '<span class="muted">Could not compute hash</span>';
+        }
+        html += '</span></div>';
+
+        html += '<div class="file-dl-row">';
+        if (info.vt_link) {
+            html += '<a href="' + esc(info.vt_link) + '" target="_blank" rel="noopener noreferrer" class="file-dl-key file-dl-key-link">VirusTotal</a>';
+        } else {
+            html += '<span class="file-dl-key">VirusTotal</span>';
+        }
+        html += '<span class="file-dl-val">';
+        if (info.vt_total_engines > 0) {
+            var badgeCls = info.vt_detections > 0 ? "badge-vt-malicious" : "badge-vt-clean";
+            html += '<span class="badge ' + badgeCls + '">' + info.vt_detections + '/' + info.vt_total_engines + ' engines</span>';
+            if (info.popular_threat_label) html += ' <span class="vt-threat-label">' + esc(info.popular_threat_label) + '</span>';
+            if (info.threat_category) html += ' <span class="badge badge-threat-category">' + esc(info.threat_category) + '</span>';
+        } else if (info.vt_link) {
+            html += '<span class="badge badge-vt-unknown">Not in database</span>';
+        } else {
+            html += '<span class="muted">No API key configured</span>';
+        }
+        html += '</span></div></div>';
+
+        /* Meta row */
+        html += '<div class="file-dl-meta">';
+        html += '<span class="file-dl-meta-item"><span class="file-dl-meta-label">HOST:</span> <span class="file-dl-meta-value">' + esc(info.hosting_domain) + '</span>';
+        if (info.is_abused_host) html += ' <span class="flag flag-critical">Abused CDN</span>';
+        html += '</span>';
+        if (info.content_type) html += '<span class="file-dl-meta-item"><span class="file-dl-meta-label">TYPE:</span> <span class="file-dl-meta-value">' + esc(info.content_type) + '</span></span>';
+        if (info.size_bytes > 0) {
+            var sz = info.size_bytes < 1024 ? info.size_bytes + " B"
+                : info.size_bytes < 1048576 ? (info.size_bytes / 1024).toFixed(1) + " KB"
+                : (info.size_bytes / 1048576).toFixed(1) + " MB";
+            html += '<span class="file-dl-meta-item"><span class="file-dl-meta-label">SIZE:</span> <span class="file-dl-meta-value">' + sz + '</span></span>';
+        }
+        html += '</div></div>';
+
+        document.getElementById("download-body").innerHTML = html;
+    });
+
+    /* ---- redirect_chain ---- */
+    es.addEventListener("redirect_chain", function (e) {
+        var d = JSON.parse(e.data);
+        if (!d.chain || !d.chain.length) return;
+        document.getElementById("section-redirect").style.display = "";
+        var html = '<div class="redirect-chain">';
+        d.chain.forEach(function (hop, i) {
+            html += '<span class="redirect-hop">' + esc(hop) + '</span>';
+            if (i < d.chain.length - 1) html += '<span class="redirect-arrow">&rarr;</span>';
+        });
+        html += '</div>';
+        document.getElementById("redirect-body").innerHTML = html;
+    });
+
+    /* ---- score ---- */
+    es.addEventListener("score", function (e) {
+        var d = JSON.parse(e.data);
+        /* Map risk category value to CSS class */
+        var catMap = {
+            "Safe": "safe",
+            "Suspicious": "suspicious",
+            "Likely Phishing": "likely_phishing",
+            "Confirmed Phishing": "confirmed_phishing",
+            "Malicious File Download": "malicious_download",
+            "Suspicious File Download": "suspicious_download"
+        };
+        var catClass = catMap[d.risk_category] || "safe";
+
+        var banner = document.getElementById("score-banner");
+        banner.className = "score-banner score-" + catClass;
+        document.getElementById("score-value").textContent = d.overall_score.toFixed(1);
+        document.getElementById("score-label").textContent = d.risk_category;
+
+        var rec = document.getElementById("recommendation");
+        rec.style.display = "";
+        rec.className = "recommendation rec-" + catClass;
+        document.getElementById("recommendation-text").textContent = d.recommendation;
+    });
+
+    /* ---- complete ---- */
+    es.addEventListener("complete", function () {
+        es.close();
+        /* Remove any leftover loading indicators */
+        var loaders = document.querySelectorAll(".skeleton-loading");
+        loaders.forEach(function (el) { el.remove(); });
+    });
+
+    /* ---- error ---- */
+    es.addEventListener("error", function (e) {
+        if (e.data) {
+            es.close();
+            var d = JSON.parse(e.data);
+            alert("Scan error: " + (d.message || "Unknown error"));
+        }
+    });
+})();
+</script>
+
+{% else %}
+{# ================================================================
+   STATIC MODE — full results (existing template, unchanged)
+   ================================================================ #}
+{% set r = report %}
+{% set cat = r.risk_category.name | lower %}
+
+<!-- Score Banner -->
+<section class="score-banner score-{{ cat }}">
+    <div class="score-value">{{ "%.1f" | format(r.overall_score) }}</div>
+    <div class="score-label">{{ r.risk_category.value }}</div>
+    <div class="score-url">{{ r.url }}</div>
+</section>
+
+<!-- Recommendation -->
+<section class="recommendation rec-{{ cat }}">
+    <p>{{ r.recommendation }}</p>
+</section>
+
+<!-- Screenshot -->
+<section class="card">
+    <details open>
+        <summary class="section-toggle">Page Screenshot</summary>
+        <div class="section-body">
+            {% if screenshot_filename %}
+            <div class="screenshot-wrapper">
+                <img src="/screenshots/{{ screenshot_filename }}" alt="Screenshot of {{ r.url }}" class="screenshot-img">
+            </div>
+            {% else %}
+            <div class="screenshot-unavailable">
+                <div class="screenshot-unavailable-icon">&#128247;</div>
+                <p>Screenshot unavailable</p>
+                <p class="muted">The site blocked the capture or the connection timed out.</p>
+            </div>
+            {% endif %}
+        </div>
+    </details>
+</section>
+
+<!-- URL Threat Feed Matches -->
+{% if r.feed_results %}
+<section class="card">
+    <details open>
+        <summary class="section-toggle">URL Threat Feed Results</summary>
+        <div class="section-body">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Feed</th>
+                        <th>Match</th>
+                        <th>Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for f in r.feed_results|sort(attribute='display_order')|sort(attribute='matched', reverse=true) %}
+                    <tr class="{% if f.matched %}feed-match{% endif %}">
+                        <td>{{ f.feed_name }}</td>
+                        <td>
+                            {% if f.matched %}
+                            <span class="badge badge-confirmed_phishing">MATCH</span>
+                            {% else %}
+                            <span class="badge badge-status-skipped">Not Found</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ f.details or "—" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+</section>
+{% endif %}
+
+<!-- File Download Analysis -->
+{% if r.file_download and r.file_download.detected %}
+<section class="card">
+    <details open>
+        <summary class="section-toggle">File Download Analysis</summary>
+        <div class="section-body">
+
+            {% if r.file_download.cloudflare_blocked %}
+            <div class="cf-block-banner">
+                <strong>&#9888; Cloudflare Phishing Interstitial Detected</strong>
+                <p>Cloudflare has flagged this URL as suspected phishing. The file download is gated behind a Turnstile challenge that cannot be solved in an automated environment. Use the manual hash lookup below to complete the analysis.</p>
+            </div>
+            {% endif %}
+
+            <div class="file-dl-stack">
+                <!-- Filename header -->
+                <div class="file-dl-filename">
+                    {% if r.file_download.filename %}
+                        <span class="file-dl-filename-label">File name:</span> {{ r.file_download.filename }}
+                    {% elif r.file_download.cloudflare_blocked %}
+                        <span class="muted" style="font-weight:400;">Unknown filename &mdash; hidden behind Cloudflare interstitial</span>
+                    {% else %}
+                        <span class="muted" style="font-weight:400;">Unknown filename</span>
+                    {% endif %}
+                    {% if r.file_download.extension %}
+                    <span class="flag flag-warning">{{ r.file_download.extension }}</span>
+                    {% endif %}
+                </div>
+
+                <!-- Indented details: hash and VT -->
+                <div class="file-dl-details">
+                    <div class="file-dl-row">
+                        <span class="file-dl-key">SHA-256</span>
+                        <span class="file-dl-val">
+                            {% if r.file_download.sha256 %}
+                            <code class="hash-value">{{ r.file_download.sha256 }}</code>
+                            {% else %}
+                            <span class="muted" id="hash-empty-msg">
+                                {% if r.file_download.cloudflare_blocked %}
+                                Could not retrieve file &mdash; use manual lookup below
+                                {% else %}
+                                Could not compute hash
+                                {% endif %}
+                            </span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="file-dl-row">
+                        {% if r.file_download.vt_link %}
+                        <a href="{{ r.file_download.vt_link }}" target="_blank" rel="noopener noreferrer" class="file-dl-key file-dl-key-link" id="vt-key-label">VirusTotal</a>
+                        {% else %}
+                        <span class="file-dl-key" id="vt-key-label">VirusTotal</span>
+                        {% endif %}
+                        <span class="file-dl-val" id="vt-result-cell">
+                            {% if r.file_download.vt_total_engines > 0 %}
+                                {% if r.file_download.vt_detections > 0 %}
+                                <span class="badge badge-vt-malicious">{{ r.file_download.vt_detections }}/{{ r.file_download.vt_total_engines }} engines</span>
+                                {% else %}
+                                <span class="badge badge-vt-clean">0/{{ r.file_download.vt_total_engines }} engines</span>
+                                {% endif %}
+                                {% if r.file_download.popular_threat_label %}
+                                <span class="vt-threat-label">{{ r.file_download.popular_threat_label }}</span>
+                                {% endif %}
+                                {% if r.file_download.threat_category %}
+                                <span class="badge badge-threat-category">{{ r.file_download.threat_category }}</span>
+                                {% endif %}
+                            {% elif r.file_download.vt_link %}
+                                <span class="badge badge-vt-unknown">Not in database</span>
+                            {% elif not r.file_download.sha256 %}
+                                <span class="muted">Pending hash input</span>
+                            {% else %}
+                                <span class="muted">No API key configured</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Secondary metadata row -->
+                <div class="file-dl-meta">
+                    <span class="file-dl-meta-item">
+                        <span class="file-dl-meta-label">HOST:</span>
+                        <span class="file-dl-meta-value">{{ r.file_download.hosting_domain }}</span>
+                        {% if r.file_download.is_abused_host %}
+                        <span class="flag flag-critical">Abused CDN</span>
+                        {% endif %}
+                    </span>
+                    {% if r.file_download.content_type %}
+                    <span class="file-dl-meta-item">
+                        <span class="file-dl-meta-label">TYPE:</span>
+                        <span class="file-dl-meta-value">{{ r.file_download.content_type }}</span>
+                    </span>
+                    {% endif %}
+                    {% if r.file_download.size_bytes > 0 %}
+                    <span class="file-dl-meta-item">
+                        <span class="file-dl-meta-label">SIZE:</span>
+                        <span class="file-dl-meta-value">{{ r.file_download.size_bytes | filesizeformat }}</span>
+                    </span>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if not r.file_download.sha256 %}
+            <div class="hash-input-section">
+                <label for="manual-hash" class="hash-input-label">Manual Hash Lookup</label>
+                <p class="muted" style="margin: 0.25rem 0 0.5rem;">Paste a SHA-256 hash from a sandbox or local analysis to query VirusTotal.</p>
+                <div class="hash-input-row">
+                    <input type="text" id="manual-hash" class="hash-input" placeholder="SHA-256 (64 hex characters)" maxlength="64" spellcheck="false" autocomplete="off">
+                    <button type="button" id="hash-lookup-btn" class="btn btn-primary btn-sm" onclick="lookupHash()">Look Up</button>
+                </div>
+                <div id="hash-lookup-result" class="hash-lookup-result" style="display:none;"></div>
+            </div>
+            <script>
+            async function lookupHash() {
+                const input = document.getElementById('manual-hash');
+                const btn = document.getElementById('hash-lookup-btn');
+                const result = document.getElementById('hash-lookup-result');
+                const vtCell = document.getElementById('vt-result-cell');
+                const sha = input.value.trim().toLowerCase();
+
+                if (!/^[a-f0-9]{64}$/.test(sha)) {
+                    result.style.display = 'block';
+                    result.className = 'hash-lookup-result hash-lookup-error';
+                    result.textContent = 'Invalid hash. Must be 64 hex characters (SHA-256).';
+                    return;
+                }
+
+                btn.disabled = true;
+                btn.textContent = 'Looking up\u2026';
+                result.style.display = 'block';
+                result.className = 'hash-lookup-result';
+                result.textContent = 'Querying VirusTotal\u2026';
+
+                try {
+                    const resp = await fetch('/api/hash-lookup', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({sha256: sha}),
+                    });
+                    const data = await resp.json();
+
+                    if (data.error) {
+                        result.className = 'hash-lookup-result hash-lookup-error';
+                        result.textContent = data.error;
+                    } else if (!data.found) {
+                        result.className = 'hash-lookup-result hash-lookup-warn';
+                        result.innerHTML = 'Hash not found in VirusTotal database. <a href="' + data.vt_link + '" target="_blank" rel="noopener noreferrer">View on VirusTotal</a>';
+                    } else {
+                        const det = data.detections;
+                        const total = data.total;
+                        const cls = det > 0 ? 'hash-lookup-danger' : 'hash-lookup-clean';
+                        result.className = 'hash-lookup-result ' + cls;
+                        result.innerHTML = '<strong>' + det + '/' + total + ' engines</strong> flagged this file'
+                            + (data.malicious > 0 ? ' (' + data.malicious + ' malicious' + (data.suspicious > 0 ? ', ' + data.suspicious + ' suspicious' : '') + ')' : '')
+                            + '. <a href="' + data.vt_link + '" target="_blank" rel="noopener noreferrer">View full report on VT</a>';
+
+                        const emptyMsg = document.getElementById('hash-empty-msg');
+                        if (emptyMsg) {
+                            emptyMsg.outerHTML = '<code class="hash-value">' + sha + '</code>';
+                        }
+                        const vtKeyLabel = document.getElementById('vt-key-label');
+                        if (vtKeyLabel && vtKeyLabel.tagName !== 'A') {
+                            const link = document.createElement('a');
+                            link.href = data.vt_link;
+                            link.target = '_blank';
+                            link.rel = 'noopener noreferrer';
+                            link.className = 'file-dl-key file-dl-key-link';
+                            link.id = 'vt-key-label';
+                            link.textContent = 'VirusTotal';
+                            vtKeyLabel.replaceWith(link);
+                        }
+                        if (vtCell) {
+                            const badgeCls = det > 0 ? 'badge-vt-malicious' : 'badge-vt-clean';
+                            let vtHtml = '<span class="badge ' + badgeCls + '">' + det + '/' + total + ' engines</span>';
+                            if (data.popular_threat_label) {
+                                vtHtml += ' <span class="vt-threat-label">' + data.popular_threat_label + '</span>';
+                            }
+                            if (data.threat_category) {
+                                vtHtml += ' <span class="badge badge-threat-category">' + data.threat_category + '</span>';
+                            }
+                            vtCell.innerHTML = vtHtml;
+                        }
+                    }
+                } catch (err) {
+                    result.className = 'hash-lookup-result hash-lookup-error';
+                    result.textContent = 'Request failed: ' + err.message;
+                }
+
+                btn.disabled = false;
+                btn.textContent = 'Look Up';
+            }
+
+            document.getElementById('manual-hash').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') lookupHash();
+            });
+            </script>
+            {% endif %}
+
+        </div>
+    </details>
+</section>
+{% endif %}
+
+<!-- Link Discovery -->
+{% if r.discovered_links %}
+<section class="card">
+    <details open>
+        <summary class="section-toggle">Link Discovery</summary>
+        <div class="section-body">
+            <p class="muted" style="margin-bottom: 0.75rem;">
+                Auth-related links were clicked and inspected for hidden credential harvesters.
+            </p>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Element</th>
+                        <th>Destination</th>
+                        <th>Flags</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for dl in r.discovered_links %}
+                    <tr class="{% if dl.has_credential_form %}feed-match{% endif %}">
+                        <td>"{{ dl.element_text }}"</td>
+                        <td class="url-cell">{{ dl.destination_url }}</td>
+                        <td class="discovery-flags">
+                            {% if dl.is_cross_domain %}
+                            <span class="flag flag-warning">Cross-domain</span>
+                            {% endif %}
+                            {% if dl.has_credential_form %}
+                            <span class="flag flag-critical">Credential form</span>
+                            {% endif %}
+                            {% if dl.brand_detected %}
+                            <span class="flag flag-brand">Brand: {{ dl.brand_detected }}</span>
+                            {% endif %}
+                            {% if not dl.is_cross_domain and not dl.has_credential_form and not dl.brand_detected %}
+                            <span class="muted">None</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+</section>
+{% endif %}
+
+<!-- OSINT Links -->
+{% if r.osint_links %}
+<section class="card">
+    <details open>
+        <summary class="section-toggle">OSINT Links</summary>
+        <div class="section-body">
+            <div class="osint-grid">
+                {% for link in r.osint_links %}
+                <a href="{{ link.url }}" target="_blank" rel="noopener noreferrer" class="osint-link osint-{{ link.icon_class }}">
+                    <span class="osint-name">{{ link.name }}</span>
+                    <span class="osint-desc">{{ link.description }}</span>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+</section>
+{% endif %}
+
+<!-- Analyzer Breakdown -->
+<section class="card">
+    <details open>
+        <summary class="section-toggle">Analyzer Breakdown</summary>
+        <div class="section-body">
+            <table class="table table--fixed">
+                <colgroup>
+                    <col style="width:55%">
+                    <col style="width:15%">
+                    <col style="width:15%">
+                    <col style="width:15%">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>Analyzer</th>
+                        <th>Status</th>
+                        <th>Score</th>
+                        <th>Weight</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for a in r.analyzer_results %}
+                    <tr>
+                        <td>
+                            <details>
+                                <summary>{{ a.analyzer_name }}</summary>
+                                {% if a.findings %}
+                                <ul class="findings-list">
+                                    {% for f in a.findings | sort_by_severity %}
+                                    <li onclick="this.classList.toggle('expanded')">
+                                        <span class="severity severity-{{ f.severity }}">{{ f.severity }}</span>
+                                        {{ f.description }} (+{{ "%.0f" | format(f.score_contribution) }})
+                                    </li>
+                                    {% endfor %}
+                                </ul>
+                                {% elif a.error_message %}
+                                <p class="error-message">{{ a.error_message }}</p>
+                                {% else %}
+                                <p class="muted">No findings.</p>
+                                {% endif %}
+                            </details>
+                        </td>
+                        <td>
+                            <span class="badge badge-status-{{ a.status.value | lower }}">
+                                {{ a.status.value }}
+                            </span>
+                        </td>
+                        <td>{{ "%.1f" | format(a.score) }}</td>
+                        <td>{{ "%.0f" | format(a.max_weight) }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </details>
+</section>
+
+<!-- Redirect Chain -->
+{% if r.redirect_chain %}
+<section class="card">
+    <details open>
+        <summary class="section-toggle">Redirect Chain</summary>
+        <div class="section-body">
+            <div class="redirect-chain">
+                {% for hop in r.redirect_chain %}
+                    <span class="redirect-hop">{{ hop }}</span>
+                    {% if not loop.last %}
+                    <span class="redirect-arrow">&rarr;</span>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+</section>
+{% endif %}
+
+<!-- Metadata -->
+<section class="card">
+    <details>
+        <summary class="section-toggle">Scan Metadata</summary>
+        <div class="section-body meta-content">
+            <p><strong>Scan ID:</strong> {{ scan_id }}</p>
+            <p><strong>Timestamp:</strong> {{ r.timestamp }}</p>
+            {% if ip %}<p><strong>Resolved IP:</strong> {{ ip }}</p>{% endif %}
+            <p><strong>Domain:</strong> {{ domain }}</p>
+        </div>
+    </details>
+</section>
+
+<div class="actions">
+    <a href="/" class="btn btn-primary">New Scan</a>
+</div>
+{% endif %}
+
+{% endblock %}

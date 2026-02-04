@@ -1,0 +1,39 @@
+# =============================================================================
+# IRIS — Docker Compose
+# =============================================================================
+#
+# Quick start:
+#   1. Copy your API keys:  cp config/default.yaml config/local.yaml
+#      Edit config/local.yaml with your VirusTotal, Google Safe Browsing, etc. keys
+#
+#   2. Run:  docker compose up --build
+#
+#   3. Open:  http://localhost:8000
+#
+# Alternatively, pass API keys as environment variables (see below).
+# =============================================================================
+
+services:
+  iris:
+    build: .
+    container_name: iris
+    ports:
+      - "8000:8000"
+
+    # Chrome needs more than the default 64 MB shared memory
+    shm_size: "2gb"
+
+    volumes:
+      # Mount local API key config (create from default.yaml, gitignored)
+      - ./config/local.yaml:/app/config/local.yaml:ro
+      # Persist screenshots across container restarts
+      - ./screenshots:/app/screenshots
+
+    # Optional: pass API keys via environment variables instead of local.yaml
+    # Uncomment and fill in the keys you have:
+    # environment:
+    #   - VIRUSTOTAL_API_KEY=your_key_here
+    #   - GOOGLE_SAFEBROWSING_API_KEY=your_key_here
+    #   - ABUSEIPDB_API_KEY=your_key_here
+
+    restart: unless-stopped

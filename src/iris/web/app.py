@@ -1,0 +1,736 @@
+"""FastAPI web application for IRIS."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+import tempfile
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import requests as http_requests
+import tldextract
+import uvicorn
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.responses import StreamingResponse
+
+from iris.config import get_api_key, load_config
+from iris.scanner import scan_url, shutdown_browser
+from iris.web.osint import generate_osint_links
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+_WEB_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _WEB_DIR.parent.parent.parent
+_SCREENSHOT_DIR = _PROJECT_ROOT / "screenshots"
+
+# ---------------------------------------------------------------------------
+# Dedicated scan executor (single thread)
+# ---------------------------------------------------------------------------
+# All scans run on ONE thread so Playwright's greenlet-bound sync API
+# can keep a persistent browser alive between scans.
+_scan_executor = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="iris-scan",
+)
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """FastAPI lifespan handler for startup/shutdown tasks.
+
+    On shutdown: close the persistent Playwright browser and the scan
+    executor thread.
+    """
+    yield
+    # Shutdown: close persistent browser from within the scan thread
+    try:
+        _scan_executor.submit(shutdown_browser).result(timeout=10)
+    except Exception:
+        pass
+    _scan_executor.shutdown(wait=False)
+
+
+app = FastAPI(title="IRIS", version="0.1.0", lifespan=_lifespan)
+
+templates = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
+
+# Severity ordering for findings: highest priority first
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _sort_by_severity(findings: list) -> list:
+    """Sort findings by severity (critical first, info last).
+
+    Args:
+        findings: List of Finding dataclass instances or dicts.
+
+    Returns:
+        A new list sorted by severity priority.
+    """
+    def _get_severity(f: Any) -> int:
+        sev = f.get("severity", "") if isinstance(f, dict) else getattr(f, "severity", "")
+        return _SEVERITY_ORDER.get(sev, 5)
+
+    return sorted(findings, key=_get_severity)
+
+
+templates.env.filters["sort_by_severity"] = _sort_by_severity
+
+
+def _filesizeformat(value: int) -> str:
+    """Format a byte count as a human-readable file size.
+
+    Args:
+        value: Size in bytes.
+
+    Returns:
+        Human-readable size string (e.g. '1.5 MB').
+    """
+    if value < 1024:
+        return f"{value} B"
+    elif value < 1024 * 1024:
+        return f"{value / 1024:.1f} KB"
+    else:
+        return f"{value / (1024 * 1024):.1f} MB"
+
+
+templates.env.filters["filesizeformat"] = _filesizeformat
+
+# Serve CSS/JS static assets
+app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")), name="static")
+
+# Serve screenshot images
+_SCREENSHOT_DIR.mkdir(exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory=str(_SCREENSHOT_DIR)), name="screenshots")
+
+# ---------------------------------------------------------------------------
+# In-memory scan store with disk-backed cache
+# ---------------------------------------------------------------------------
+_scans: dict[str, dict[str, Any]] = {}
+_CACHE_FILE = _SCREENSHOT_DIR / "scan_cache.json"
+_CACHE_TTL = 86400  # 24 hours in seconds
+
+logger = logging.getLogger(__name__)
+
+
+def _serialize_scans() -> list[dict]:
+    """Convert the in-memory scan store to JSON-serialisable dicts.
+
+    Returns:
+        List of scan entry dicts with all dataclass fields flattened.
+    """
+    from iris.models import (
+        AnalyzerResult,
+        DiscoveredLink,
+        FeedResult,
+        FileDownloadInfo,
+        ScanReport,
+    )
+
+    entries = []
+    for entry in _scans.values():
+        d = {
+            "scan_id": entry["scan_id"],
+            "domain": entry["domain"],
+            "ip": entry["ip"],
+            "screenshot_filename": entry["screenshot_filename"],
+            "report": asdict(entry["report"]),
+        }
+        # Store enum values as strings for JSON
+        d["report"]["risk_category"] = entry["report"].risk_category.value
+        for ar in d["report"]["analyzer_results"]:
+            ar["status"] = ar["status"].value if hasattr(ar["status"], "value") else ar["status"]
+        entries.append(d)
+    return entries
+
+
+def _deserialize_scans(entries: list[dict]) -> dict[str, dict[str, Any]]:
+    """Rebuild the in-memory scan store from cached JSON dicts.
+
+    Args:
+        entries: List of serialised scan entry dicts from disk.
+
+    Returns:
+        Dict keyed by scan_id with full dataclass objects restored.
+    """
+    from iris.models import (
+        AnalyzerResult,
+        AnalyzerStatus,
+        DiscoveredLink,
+        FeedResult,
+        FileDownloadInfo,
+        Finding,
+        RiskCategory,
+        ScanReport,
+    )
+
+    # Build reverse lookup for enums
+    _rc_map = {e.value: e for e in RiskCategory}
+    _as_map = {e.value: e for e in AnalyzerStatus}
+
+    scans = {}
+    for entry in entries:
+        try:
+            rd = entry["report"]
+
+            findings_lists = []
+            analyzer_results = []
+            for ar in rd.get("analyzer_results", []):
+                findings = [Finding(**f) for f in ar.get("findings", [])]
+                analyzer_results.append(AnalyzerResult(
+                    analyzer_name=ar["analyzer_name"],
+                    status=_as_map.get(ar["status"], AnalyzerStatus.COMPLETED),
+                    score=ar["score"],
+                    max_weight=ar["max_weight"],
+                    findings=findings,
+                    error_message=ar.get("error_message", ""),
+                ))
+
+            feed_results = [
+                FeedResult(
+                    feed_name=fr["feed_name"],
+                    matched=fr["matched"],
+                    details=fr.get("details", ""),
+                    raw_response=fr.get("raw_response", {}),
+                    display_order=fr.get("display_order", 99),
+                )
+                for fr in rd.get("feed_results", [])
+            ]
+
+            discovered_links = [
+                DiscoveredLink(**dl)
+                for dl in rd.get("discovered_links", [])
+            ]
+
+            file_download = None
+            fd = rd.get("file_download")
+            if fd:
+                file_download = FileDownloadInfo(**fd)
+
+            report = ScanReport(
+                url=rd["url"],
+                overall_score=rd["overall_score"],
+                risk_category=_rc_map.get(rd["risk_category"], RiskCategory.SAFE),
+                analyzer_results=analyzer_results,
+                feed_results=feed_results,
+                redirect_chain=rd.get("redirect_chain", []),
+                recommendation=rd.get("recommendation", ""),
+                timestamp=rd.get("timestamp", ""),
+                screenshot_path=rd.get("screenshot_path", ""),
+                osint_links=rd.get("osint_links", []),
+                resolved_ip=rd.get("resolved_ip", ""),
+                discovered_links=discovered_links,
+                file_download=file_download,
+            )
+
+            scans[entry["scan_id"]] = {
+                "scan_id": entry["scan_id"],
+                "report": report,
+                "domain": entry.get("domain", ""),
+                "ip": entry.get("ip", ""),
+                "screenshot_filename": entry.get("screenshot_filename", ""),
+            }
+        except Exception as exc:
+            logger.warning("Skipping corrupt cache entry %s: %s", entry.get("scan_id"), exc)
+            continue
+
+    return scans
+
+
+def _prune_expired(scans: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Remove scan entries older than the cache TTL.
+
+    Args:
+        scans: The scan store dict.
+
+    Returns:
+        A new dict with only non-expired entries.
+    """
+    now = datetime.now(timezone.utc)
+    pruned = {}
+    for scan_id, entry in scans.items():
+        ts = entry["report"].timestamp
+        try:
+            scan_time = datetime.fromisoformat(ts)
+            if (now - scan_time).total_seconds() < _CACHE_TTL:
+                pruned[scan_id] = entry
+        except (ValueError, TypeError):
+            pruned[scan_id] = entry  # Keep entries with unparseable timestamps
+    return pruned
+
+
+def _load_cache() -> None:
+    """Load scan results from the cache file on disk.
+
+    Populates ``_scans`` with entries that are still within the TTL window.
+    Silently ignores missing or corrupt cache files.
+    """
+    global _scans
+    if not _CACHE_FILE.exists():
+        return
+    try:
+        data = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+        _scans = _prune_expired(_deserialize_scans(data))
+        logger.info("Loaded %d cached scan(s) from disk.", len(_scans))
+    except Exception as exc:
+        logger.warning("Failed to load scan cache: %s", exc)
+
+
+def _save_cache() -> None:
+    """Persist the current scan store to disk atomically.
+
+    Prunes expired entries first, then writes to a temporary file and
+    renames to avoid corruption on crash.
+    """
+    global _scans
+    try:
+        _scans = _prune_expired(_scans)
+        payload = json.dumps(_serialize_scans(), default=str, ensure_ascii=False)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(_SCREENSHOT_DIR), suffix=".tmp", prefix="scan_cache_",
+        )
+        closed = False
+        try:
+            os.write(fd, payload.encode("utf-8"))
+            os.close(fd)
+            closed = True
+            os.replace(tmp_path, str(_CACHE_FILE))
+        except Exception:
+            if not closed:
+                os.close(fd)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+    except Exception as exc:
+        logger.warning("Failed to save scan cache: %s", exc)
+
+
+# Hydrate from disk on startup
+_load_cache()
+
+# ---------------------------------------------------------------------------
+# Configuration (loaded once at startup)
+# ---------------------------------------------------------------------------
+_config: dict[str, Any] = load_config()
+
+
+def _resolve_ip(url: str) -> str:
+    """Attempt to resolve the domain in *url* to an IP address.
+
+    Uses the shared DNS utility which falls back to DNS-over-HTTPS
+    when the system resolver blocks the domain.
+
+    Args:
+        url: The URL whose domain should be resolved.
+
+    Returns:
+        The resolved IPv4 address string, or empty string on failure.
+    """
+    from iris.dns_util import resolve_hostname
+
+    return resolve_hostname(url)
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming infrastructure
+# ---------------------------------------------------------------------------
+# Maps scan_id -> asyncio.Queue of (event_type, data) tuples for active scans.
+_active_streams: dict[str, asyncio.Queue] = {}
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request) -> HTMLResponse:
+    """Render the home page with the URL input form."""
+    recent = list(_scans.values())[-10:]
+    recent.reverse()
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "recent_scans": recent},
+    )
+
+
+@app.post("/scan")
+def scan(request: Request, url: str = Form(...)) -> RedirectResponse:
+    """Accept a URL, run the IRIS scan, and redirect to results.
+
+    This is a sync handler (not async) so FastAPI runs it in a threadpool.
+    The scan itself is dispatched to the dedicated single-thread executor
+    so that Playwright's persistent browser is always used from the same
+    thread.
+
+    Args:
+        request: The incoming HTTP request.
+        url: The URL submitted via form.
+
+    Returns:
+        A redirect to the results page for this scan.
+    """
+    # Normalise URL scheme
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    scan_id = uuid.uuid4().hex[:12]
+
+    # Run the scan on the dedicated executor thread (browser persistence)
+    future = _scan_executor.submit(
+        scan_url,
+        url=url,
+        config=_config,
+        passive_only=False,
+        screenshot_dir=str(_SCREENSHOT_DIR),
+    )
+    report = future.result()  # Block until complete
+
+    # Resolve IP & generate OSINT links
+    extracted = tldextract.extract(url)
+    domain = f"{extracted.domain}.{extracted.suffix}"
+    ip = _resolve_ip(url)
+
+    report.resolved_ip = ip
+    report.osint_links = generate_osint_links(url, domain, ip)
+
+    # Derive screenshot filename for the template (relative to /screenshots/)
+    screenshot_filename = ""
+    if report.screenshot_path:
+        screenshot_filename = Path(report.screenshot_path).name
+
+    _scans[scan_id] = {
+        "scan_id": scan_id,
+        "report": report,
+        "domain": domain,
+        "ip": ip,
+        "screenshot_filename": screenshot_filename,
+    }
+
+    _save_cache()
+
+    return RedirectResponse(url=f"/results/{scan_id}", status_code=303)
+
+
+@app.post("/api/scan")
+async def api_scan(request: Request) -> JSONResponse:
+    """Start a scan in the background and return the scan_id immediately.
+
+    The client should navigate to /results/{scan_id}?stream=1 and
+    connect to /stream/{scan_id} for real-time SSE events.
+
+    Args:
+        request: The incoming HTTP request with JSON body.
+
+    Returns:
+        JSON with the scan_id.
+    """
+    body = await request.json()
+    raw_url = (body.get("url") or "").strip()
+    if not raw_url:
+        return JSONResponse({"error": "URL required"}, status_code=400)
+
+    url = raw_url
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    scan_id = uuid.uuid4().hex[:12]
+
+    # Resolve metadata early (fast, <1s)
+    extracted = tldextract.extract(url)
+    domain = f"{extracted.domain}.{extracted.suffix}"
+    ip = _resolve_ip(url)
+    osint_links = generate_osint_links(url, domain, ip)
+
+    # Create event queue for this scan
+    event_queue: asyncio.Queue = asyncio.Queue()
+    _active_streams[scan_id] = event_queue
+
+    loop = asyncio.get_event_loop()
+
+    def on_event(event_type: str, data: dict) -> None:
+        """Thread-safe callback that puts events on the async queue."""
+        loop.call_soon_threadsafe(event_queue.put_nowait, (event_type, data))
+
+    def run_scan() -> None:
+        """Run the full scan on the dedicated executor thread."""
+        try:
+            # Emit metadata + OSINT immediately
+            on_event("metadata", {
+                "scan_id": scan_id,
+                "url": url,
+                "domain": domain,
+                "ip": ip,
+            })
+            on_event("osint", {"links": osint_links})
+
+            report = scan_url(
+                url=url,
+                config=_config,
+                passive_only=False,
+                screenshot_dir=str(_SCREENSHOT_DIR),
+                on_event=on_event,
+            )
+
+            report.resolved_ip = ip
+            report.osint_links = osint_links
+
+            screenshot_filename = ""
+            if report.screenshot_path:
+                screenshot_filename = Path(report.screenshot_path).name
+
+            _scans[scan_id] = {
+                "scan_id": scan_id,
+                "report": report,
+                "domain": domain,
+                "ip": ip,
+                "screenshot_filename": screenshot_filename,
+            }
+            _save_cache()
+
+        except Exception as exc:
+            logger.error("Scan failed for %s: %s", url, exc)
+            on_event("error", {"message": str(exc)})
+        finally:
+            on_event("complete", {})
+            # Schedule cleanup of the event queue after 60 seconds
+            loop.call_soon_threadsafe(
+                loop.call_later,
+                60,
+                lambda: _active_streams.pop(scan_id, None),
+            )
+
+    _scan_executor.submit(run_scan)
+
+    return JSONResponse({"scan_id": scan_id, "url": url})
+
+
+@app.get("/stream/{scan_id}")
+async def stream(scan_id: str) -> StreamingResponse:
+    """SSE endpoint that streams scan events in real time.
+
+    Args:
+        scan_id: The unique scan identifier.
+
+    Returns:
+        A streaming response with text/event-stream content type.
+    """
+    event_queue = _active_streams.get(scan_id)
+
+    if event_queue is None:
+        # Scan may already be complete
+        if scan_id in _scans:
+            async def done_stream():
+                yield "event: already_complete\ndata: {}\n\n"
+            return StreamingResponse(
+                done_stream(), media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        async def error_stream():
+            yield 'event: error\ndata: {"message": "Scan not found"}\n\n'
+        return StreamingResponse(
+            error_stream(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def event_generator():
+        while True:
+            try:
+                event_type, data = await asyncio.wait_for(
+                    event_queue.get(), timeout=120,
+                )
+                yield f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+                if event_type == "complete":
+                    break
+            except asyncio.TimeoutError:
+                # Send keepalive comment to prevent connection drop
+                yield ": keepalive\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/results/{scan_id}", response_class=HTMLResponse)
+async def results(request: Request, scan_id: str) -> HTMLResponse:
+    """Render the full scan report page.
+
+    Supports two modes:
+      - **Streaming** (``?stream=1``): renders a skeleton page that connects
+        to the SSE endpoint and progressively fills in results.
+      - **Static** (default): renders the full results page from stored data.
+
+    Args:
+        request: The incoming HTTP request.
+        scan_id: The unique identifier for a completed scan.
+
+    Returns:
+        The rendered results page, or an error page if scan_id is unknown.
+    """
+    streaming = request.query_params.get("stream") == "1"
+
+    if streaming:
+        # Render skeleton — scan is likely still in progress
+        return templates.TemplateResponse(
+            "results.html",
+            {
+                "request": request,
+                "streaming": True,
+                "scan_id": scan_id,
+            },
+        )
+
+    entry = _scans.get(scan_id)
+    if entry is None:
+        return templates.TemplateResponse(
+            "error.html",
+            {"request": request, "message": "Scan not found. It may have expired."},
+            status_code=404,
+        )
+
+    return templates.TemplateResponse(
+        "results.html",
+        {
+            "request": request,
+            "streaming": False,
+            **entry,
+        },
+    )
+
+
+@app.post("/api/hash-lookup")
+async def hash_lookup(request: Request) -> JSONResponse:
+    """Look up a SHA-256 hash on VirusTotal and return the results.
+
+    Accepts JSON body ``{"sha256": "..."}`` and returns VT detection stats.
+    Used by the File Download Analysis section when an analyst pastes a hash
+    they obtained externally (e.g. from a sandbox or PowerShell).
+
+    Args:
+        request: The incoming HTTP request with JSON body.
+
+    Returns:
+        JSON with detection counts, VT link, and any errors.
+    """
+    body = await request.json()
+    sha256 = (body.get("sha256") or "").strip().lower()
+
+    if not sha256 or not re.match(r"^[a-f0-9]{64}$", sha256):
+        return JSONResponse(
+            {"error": "Invalid SHA-256 hash. Must be 64 hex characters."},
+            status_code=400,
+        )
+
+    vt_key = get_api_key(_config, "virustotal")
+    if not vt_key:
+        return JSONResponse(
+            {"error": "No VirusTotal API key configured."},
+            status_code=503,
+        )
+
+    vt_link = f"https://www.virustotal.com/gui/file/{sha256}"
+    timeout = _config.get("requests", {}).get("timeout", 10)
+
+    try:
+        resp = http_requests.get(
+            f"https://www.virustotal.com/api/v3/files/{sha256}",
+            headers={"x-apikey": vt_key},
+            timeout=timeout,
+        )
+    except http_requests.exceptions.RequestException as exc:
+        return JSONResponse(
+            {"error": f"VirusTotal request failed: {exc}", "vt_link": vt_link},
+            status_code=502,
+        )
+
+    if resp.status_code == 404:
+        return JSONResponse({
+            "found": False,
+            "vt_link": vt_link,
+            "message": "Hash not found in VirusTotal database.",
+        })
+
+    if resp.status_code != 200:
+        return JSONResponse(
+            {"error": f"VirusTotal returned HTTP {resp.status_code}", "vt_link": vt_link},
+            status_code=502,
+        )
+
+    data = resp.json()
+    stats = data.get("data", {}).get("attributes", {}).get(
+        "last_analysis_stats", {},
+    )
+    malicious = stats.get("malicious", 0)
+    suspicious = stats.get("suspicious", 0)
+    undetected = stats.get("undetected", 0)
+    total = sum(stats.values()) if stats else 0
+
+    attrs = data.get("data", {}).get("attributes", {})
+    ptc = attrs.get("popular_threat_classification", {})
+    threat_label_list = ptc.get("popular_threat_name", [])
+    threat_cat_list = ptc.get("popular_threat_category", [])
+    popular_threat_label = threat_label_list[0].get("value", "") if threat_label_list else ""
+    threat_category = threat_cat_list[0].get("value", "") if threat_cat_list else ""
+
+    return JSONResponse({
+        "found": True,
+        "sha256": sha256,
+        "malicious": malicious,
+        "suspicious": suspicious,
+        "undetected": undetected,
+        "total": total,
+        "detections": malicious + suspicious,
+        "vt_link": vt_link,
+        "popular_threat_label": popular_threat_label,
+        "threat_category": threat_category,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """Start the IRIS web server."""
+    import sys
+
+    # Enable auto-reload by default during development so code changes
+    # take effect without manually restarting.  Pass --no-reload to disable.
+    is_dev = "--no-reload" not in sys.argv
+    import os
+
+    host = os.getenv("IRIS_HOST", "0.0.0.0")
+    port = int(os.getenv("IRIS_PORT", "8000"))
+    uvicorn.run(
+        "iris.web.app:app",
+        host=host,
+        port=port,
+        reload=is_dev,
+    )
+
+
+if __name__ == "__main__":
+    main()

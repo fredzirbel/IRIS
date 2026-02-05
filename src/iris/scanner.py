@@ -277,12 +277,21 @@ def scan_url(
     # accurate than "Malicious" for payload-delivery URLs.
     file_dl = scan_meta.get("file_download")
     if file_dl and file_dl.detected:
-        if risk_category == RiskCategory.MALICIOUS:
+        # If the file hash has VT detections, it's confirmed malicious
+        # regardless of the composite score (the URL-level feeds may not
+        # have indexed the campaign yet).
+        file_has_vt_detections = file_dl.vt_detections > 0
+
+        if risk_category == RiskCategory.MALICIOUS or file_has_vt_detections:
             risk_category = RiskCategory.MALICIOUS_DOWNLOAD
-            confidence = 100.0  # VT-confirmed malicious download
-        elif risk_category in (RiskCategory.UNCERTAIN, RiskCategory.SAFE):
-            # An automatic file download is inherently anomalous — even if
-            # nothing else is flagged, it should never be labelled "Safe".
+            confidence = 100.0
+            # Ensure score reflects malicious classification
+            malicious_min = config.get("scoring", {}).get(
+                "thresholds", {},
+            ).get("malicious", 60)
+            overall_score = max(overall_score, float(malicious_min))
+        else:
+            # Download detected but no VT hits on the file — suspicious.
             risk_category = RiskCategory.SUSPICIOUS_DOWNLOAD
             safe_max = config.get("scoring", {}).get(
                 "thresholds", {},
@@ -512,21 +521,16 @@ def _build_recommendation(category: RiskCategory) -> str:
         A recommendation string for the analyst.
     """
     recommendations = {
-        RiskCategory.SAFE: "This URL appears safe. No immediate action required.",
-        RiskCategory.UNCERTAIN: (
-            "This URL shows mixed signals. "
-            "Proceed with caution and verify the source before interacting."
-        ),
+        RiskCategory.SAFE: "No significant threat indicators detected.",
+        RiskCategory.UNCERTAIN: "Mixed signals detected.",
         RiskCategory.MALICIOUS: (
-            "This URL is classified as malicious based on multiple security signals."
+            "This URL is classified as malicious."
         ),
         RiskCategory.MALICIOUS_DOWNLOAD: (
-            "This URL delivers a file download flagged as malicious. "
-            "Quarantine and investigate."
+            "This URL delivers a malicious file download."
         ),
         RiskCategory.SUSPICIOUS_DOWNLOAD: (
-            "This URL delivers a suspicious file download. "
-            "Recommend sandbox analysis before interaction."
+            "This URL delivers a suspicious file download."
         ),
     }
     return recommendations.get(category, "Unable to determine risk level.")

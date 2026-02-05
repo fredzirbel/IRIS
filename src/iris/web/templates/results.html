@@ -153,7 +153,7 @@
 
 <!-- Analyzer Breakdown -->
 <section class="card" id="section-analyzers">
-    <details open>
+    <details>
         <summary class="section-toggle">Analyzer Breakdown</summary>
         <div class="section-body">
             <table class="table table--fixed">
@@ -410,6 +410,11 @@
 
         /* Hash + VT */
         html += '<div class="file-dl-details">';
+        if (info.sha1) {
+            html += '<div class="file-dl-row"><span class="file-dl-key">SHA-1</span><span class="file-dl-val">';
+            html += '<code class="hash-value">' + esc(info.sha1) + '</code>' + copyBtnHtml(info.sha1);
+            html += '</span></div>';
+        }
         html += '<div class="file-dl-row"><span class="file-dl-key">SHA-256</span><span class="file-dl-val">';
         if (info.sha256) {
             html += '<code class="hash-value">' + esc(info.sha256) + '</code>' + copyBtnHtml(info.sha256);
@@ -428,8 +433,8 @@
         if (info.vt_total_engines > 0) {
             var badgeCls = info.vt_detections > 0 ? "badge-vt-malicious" : "badge-vt-clean";
             html += '<span class="badge ' + badgeCls + '">' + info.vt_detections + '/' + info.vt_total_engines + ' engines</span>';
-            if (info.popular_threat_label) html += ' <a href="https://malpedia.caad.fkie.fraunhofer.de/search?q=' + encodeURIComponent(info.popular_threat_label) + '" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search Malpedia for ' + esc(info.popular_threat_label) + '">' + esc(info.popular_threat_label) + '</a>';
             if (info.threat_category) html += ' <span class="badge badge-threat-category">' + esc(info.threat_category) + '</span>';
+            if (info.popular_threat_label) html += ' <a href="https://www.google.com/search?q=%22' + encodeURIComponent(info.popular_threat_label) + '%22+malware+analysis" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search for ' + esc(info.popular_threat_label) + '">' + esc(info.popular_threat_label) + '</a>';
         } else if (info.vt_link) {
             html += '<span class="badge badge-vt-unknown">Not in database</span>';
         } else {
@@ -455,6 +460,7 @@
 
         _reportData.fileDownload = {
             filename: info.filename || "",
+            sha1: info.sha1 || "",
             sha256: info.sha256 || "",
             vt_detections: info.vt_detections || 0,
             vt_total_engines: info.vt_total_engines || 0,
@@ -494,7 +500,7 @@
         var banner = document.getElementById("score-banner");
         banner.className = "score-banner score-" + catClass;
         document.getElementById("score-value").textContent = d.risk_category;
-        document.getElementById("score-label").textContent = d.confidence.toFixed(0) + "% confidence";
+        document.getElementById("score-label").textContent = d.confidence.toFixed(0) + "% Confidence";
 
         var rec = document.getElementById("recommendation");
         rec.style.display = "";
@@ -599,6 +605,7 @@
             lines.push("");
             lines.push("--- File Download ---");
             if (d.fileDownload.filename) lines.push("Filename: " + d.fileDownload.filename);
+            if (d.fileDownload.sha1) lines.push("SHA-1: " + d.fileDownload.sha1);
             if (d.fileDownload.sha256) lines.push("SHA-256: " + d.fileDownload.sha256);
             if (d.fileDownload.vt_total_engines > 0) {
                 var vtLine = "VirusTotal: " + d.fileDownload.vt_detections + "/" + d.fileDownload.vt_total_engines + " engines";
@@ -747,7 +754,7 @@
 <!-- Score Banner -->
 <section class="score-banner score-{{ cat }}">
     <div class="score-value">{{ r.risk_category.value }}</div>
-    <div class="score-label">{{ "%.0f" | format(r.confidence) }}% confidence</div>
+    <div class="score-label">{{ "%.0f" | format(r.confidence) }}% Confidence</div>
     <div class="score-url">{{ r.url|defang }}</div>
 </section>
 
@@ -870,6 +877,14 @@
 
                 <!-- Indented details: hash and VT -->
                 <div class="file-dl-details">
+                    {% if r.file_download.sha1 %}
+                    <div class="file-dl-row">
+                        <span class="file-dl-key">SHA-1</span>
+                        <span class="file-dl-val">
+                            <code class="hash-value">{{ r.file_download.sha1 }}</code><button class="copy-chip" data-copy="{{ r.file_download.sha1 }}" title="Copy">&#128203;</button>
+                        </span>
+                    </div>
+                    {% endif %}
                     <div class="file-dl-row">
                         <span class="file-dl-key">SHA-256</span>
                         <span class="file-dl-val">
@@ -899,11 +914,11 @@
                                 {% else %}
                                 <span class="badge badge-vt-clean">0/{{ r.file_download.vt_total_engines }} engines</span>
                                 {% endif %}
-                                {% if r.file_download.popular_threat_label %}
-                                <a href="https://malpedia.caad.fkie.fraunhofer.de/search?q={{ r.file_download.popular_threat_label | urlencode }}" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search Malpedia for {{ r.file_download.popular_threat_label }}">{{ r.file_download.popular_threat_label }}</a>
-                                {% endif %}
                                 {% if r.file_download.threat_category %}
                                 <span class="badge badge-threat-category">{{ r.file_download.threat_category }}</span>
+                                {% endif %}
+                                {% if r.file_download.popular_threat_label %}
+                                <a href="https://www.google.com/search?q=%22{{ r.file_download.popular_threat_label | urlencode }}%22+malware+analysis" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search for {{ r.file_download.popular_threat_label }}">{{ r.file_download.popular_threat_label }}</a>
                                 {% endif %}
                             {% elif r.file_download.vt_link %}
                                 <span class="badge badge-vt-unknown">Not in database</span>
@@ -1012,11 +1027,11 @@
                         if (vtCell) {
                             const badgeCls = det > 0 ? 'badge-vt-malicious' : 'badge-vt-clean';
                             let vtHtml = '<span class="badge ' + badgeCls + '">' + det + '/' + total + ' engines</span>';
-                            if (data.popular_threat_label) {
-                                vtHtml += ' <a href="https://malpedia.caad.fkie.fraunhofer.de/search?q=' + encodeURIComponent(data.popular_threat_label) + '" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search Malpedia for ' + data.popular_threat_label + '">' + data.popular_threat_label + '</a>';
-                            }
                             if (data.threat_category) {
                                 vtHtml += ' <span class="badge badge-threat-category">' + data.threat_category + '</span>';
+                            }
+                            if (data.popular_threat_label) {
+                                vtHtml += ' <a href="https://www.google.com/search?q=%22' + encodeURIComponent(data.popular_threat_label) + '%22+malware+analysis" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search for ' + data.popular_threat_label + '">' + data.popular_threat_label + '</a>';
                             }
                             vtCell.innerHTML = vtHtml;
                         }
@@ -1207,7 +1222,7 @@
 
 <!-- Analyzer Breakdown -->
 <section class="card">
-    <details open>
+    <details>
         <summary class="section-toggle">Analyzer Breakdown</summary>
         <div class="section-body">
             <table class="table table--fixed">
@@ -1355,6 +1370,7 @@
             lines.push("");
             lines.push("--- File Download ---");
             if (d.file_download.filename) lines.push("Filename: " + d.file_download.filename);
+            if (d.file_download.sha1) lines.push("SHA-1: " + d.file_download.sha1);
             if (d.file_download.sha256) lines.push("SHA-256: " + d.file_download.sha256);
             if (d.file_download.vt_total_engines > 0) {
                 var vtLine = "VirusTotal: " + d.file_download.vt_detections + "/" + d.file_download.vt_total_engines + " engines";

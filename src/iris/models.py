@@ -65,6 +65,7 @@ class FileDownloadInfo:
     extension: str = ""
     content_type: str = ""
     size_bytes: int = 0
+    sha1: str = ""
     sha256: str = ""
     vt_detections: int = 0
     vt_total_engines: int = 0

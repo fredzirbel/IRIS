@@ -27,7 +27,7 @@ IRIS scans URLs across 8 security dimensions simultaneously — lexical analysis
 - **Active Link Discovery** — clicks sign-in/login buttons to find hidden credential harvesters
 - **File Download Analysis** — detects automatic downloads, computes SHA-256, queries VirusTotal
 - **Threat Feed Integration** — VirusTotal (severity-aware detection scaling), Google Safe Browsing, AbuseIPDB
-- **Malpedia Threat Labels** — VT threat labels link directly to Malpedia for malware family research
+- **Clickable Threat Labels** — VT threat labels link to OSINT search for malware family research
 - **OSINT Link Panel** — one-click links to VirusTotal (including redirect hops), URLScan.io, AbuseIPDB, and more
 - **Cloudflare Bypass** — navigates past Cloudflare phishing interstitials for analysis
 - **DNS-over-HTTPS Fallback** — resolves domains blocked by ISP/router DNS filters

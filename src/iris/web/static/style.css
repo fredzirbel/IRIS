@@ -75,6 +75,10 @@ a:hover { color: var(--accent-hover); }
     width: 100%;
 }
 
+.container.container-wide {
+    max-width: 1200px;
+}
+
 /* ---- Footer ---- */
 
 .footer {
@@ -271,7 +275,7 @@ details[open] > .section-toggle::before {
 }
 
 .score-value {
-    font-size: 2.5rem;
+    font-size: 2.0rem;
     font-weight: 800;
     line-height: 1;
     text-transform: uppercase;
@@ -287,7 +291,7 @@ details[open] > .section-toggle::before {
 
 .score-url {
     margin-top: 0.5rem;
-    font-size: 0.85rem;
+    font-size: 1.1rem;
     word-break: break-all;
     opacity: 0.8;
 }
@@ -872,6 +876,25 @@ a.vt-threat-label:hover {
     margin-bottom: 0.75rem;
 }
 
+/* Recent scans table: centered columns (except URL) */
+.recent-table {
+    table-layout: auto;
+}
+
+.recent-table th,
+.recent-table td {
+    text-align: center;
+    vertical-align: middle;
+}
+
+.recent-table td:first-child {
+    text-align: left;
+}
+
+.recent-table .badge {
+    white-space: nowrap;
+}
+
 .muted {
     color: var(--text-muted);
     font-size: 0.85rem;
@@ -998,6 +1021,10 @@ a.vt-threat-label:hover {
     text-align: center;
 }
 
+.bulk-form .btn {
+    margin-top: 1.25rem;
+}
+
 .bulk-status-bar {
     display: flex;
     align-items: center;
@@ -1020,6 +1047,60 @@ a.vt-threat-label:hover {
     background: var(--accent);
     border-radius: 4px;
     transition: width 0.3s ease;
+}
+
+/* Bulk scan table: auto-width columns, centered data */
+.bulk-table {
+    table-layout: auto;
+}
+
+.bulk-table th,
+.bulk-table td {
+    text-align: center;
+    vertical-align: middle;
+}
+
+.bulk-table th:nth-child(2),
+.bulk-table td:nth-child(2) {
+    text-align: left;
+}
+
+.bulk-table .badge {
+    white-space: nowrap;
+}
+
+/* Per-row scan progress bar */
+.row-progress {
+    width: 100%;
+    height: 4px;
+    background: var(--bg-input);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 0.4rem;
+}
+
+.row-progress-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent), #818cf8);
+    transition: width 0.6s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.row-progress-fill.animated {
+    background: linear-gradient(
+        90deg,
+        var(--accent),
+        #818cf8,
+        var(--accent)
+    );
+    background-size: 200% 100%;
+    animation: progress-shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes progress-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
 }
 
 /* ---- Escalation Generator ---- */

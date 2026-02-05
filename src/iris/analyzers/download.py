@@ -308,16 +308,18 @@ class DownloadAnalyzer(BaseAnalyzer):
         if typo_finding:
             findings.append(typo_finding)
 
-        # Download file and compute SHA-256.
+        # Download file and compute hashes.
         # Try requests first; fall back to browser-captured bytes if blocked.
-        sha256, size_bytes = self._download_and_hash(
+        sha1, sha256, size_bytes = self._download_and_hash(
             url, headers, timeout, verify_ssl,
         )
 
         # If requests-based download failed and the browser already captured
         # the file, use that instead.
         if not sha256 and browser_dl_info and browser_dl_info.get("path"):
-            sha256, size_bytes = self._hash_local_file(browser_dl_info["path"])
+            sha1, sha256, size_bytes = self._hash_local_file(
+                browser_dl_info["path"],
+            )
 
         # If we still have nothing and requests was blocked, try browser now
         # (the browser may not have been tried yet if header detection
@@ -325,12 +327,15 @@ class DownloadAnalyzer(BaseAnalyzer):
         if not sha256 and requests_blocked and browser is not None and not browser_dl_info:
             browser_dl_info = self._browser_download(url, browser)
             if browser_dl_info and browser_dl_info.get("path"):
-                sha256, size_bytes = self._hash_local_file(browser_dl_info["path"])
+                sha1, sha256, size_bytes = self._hash_local_file(
+                    browser_dl_info["path"],
+                )
                 if not filename and browser_dl_info.get("suggested_filename"):
                     filename = browser_dl_info["suggested_filename"]
                     file_info.filename = filename
                     file_info.extension = self._get_extension(filename, path)
 
+        file_info.sha1 = sha1
         file_info.sha256 = sha256
         file_info.size_bytes = size_bytes
 
@@ -536,16 +541,17 @@ class DownloadAnalyzer(BaseAnalyzer):
             logger.debug("Cloudflare interstitial check failed: %s", exc)
             return None
 
-    def _hash_local_file(self, file_path: str) -> tuple[str, int]:
-        """Compute SHA-256 hash of a local file.
+    def _hash_local_file(self, file_path: str) -> tuple[str, str, int]:
+        """Compute SHA-1 + SHA-256 hashes of a local file.
 
         Args:
             file_path: Absolute path to the file on disk.
 
         Returns:
-            Tuple of (sha256_hex, size_bytes). Empty string and 0 on failure.
+            Tuple of (sha1_hex, sha256_hex, size_bytes).
         """
         try:
+            sha1 = hashlib.sha1()
             sha256 = hashlib.sha256()
             total_bytes = 0
             with open(file_path, "rb") as fh:
@@ -553,14 +559,15 @@ class DownloadAnalyzer(BaseAnalyzer):
                     chunk = fh.read(8192)
                     if not chunk:
                         break
+                    sha1.update(chunk)
                     sha256.update(chunk)
                     total_bytes += len(chunk)
                     if total_bytes >= _MAX_DOWNLOAD_BYTES:
                         break
-            return sha256.hexdigest(), total_bytes
+            return sha1.hexdigest(), sha256.hexdigest(), total_bytes
         except Exception as exc:
             logger.debug("Failed to hash local file %s: %s", file_path, exc)
-            return "", 0
+            return "", "", 0
 
     def _extract_filename(self, content_disp: str, path: PurePosixPath) -> str:
         """Extract filename from Content-Disposition header or URL path.
@@ -688,8 +695,8 @@ class DownloadAnalyzer(BaseAnalyzer):
 
     def _download_and_hash(
         self, url: str, headers: dict, timeout: int, verify_ssl: bool,
-    ) -> tuple[str, int]:
-        """Download file content (up to 10MB) and compute SHA-256.
+    ) -> tuple[str, str, int]:
+        """Download file content (up to 10MB) and compute SHA-1 + SHA-256.
 
         Args:
             url: The URL to download from.
@@ -698,7 +705,7 @@ class DownloadAnalyzer(BaseAnalyzer):
             verify_ssl: Whether to verify SSL certificates.
 
         Returns:
-            Tuple of (sha256_hex, size_bytes). Empty string and 0 on failure.
+            Tuple of (sha1_hex, sha256_hex, size_bytes).
         """
         try:
             resp = requests.get(
@@ -707,21 +714,23 @@ class DownloadAnalyzer(BaseAnalyzer):
             )
             resp.raise_for_status()
 
+            sha1 = hashlib.sha1()
             sha256 = hashlib.sha256()
             total_bytes = 0
 
             for chunk in resp.iter_content(chunk_size=8192):
+                sha1.update(chunk)
                 sha256.update(chunk)
                 total_bytes += len(chunk)
                 if total_bytes >= _MAX_DOWNLOAD_BYTES:
                     break
 
             resp.close()
-            return sha256.hexdigest(), total_bytes
+            return sha1.hexdigest(), sha256.hexdigest(), total_bytes
 
         except Exception as exc:
             logger.debug("Download failed for hashing %s: %s", url, exc)
-            return "", 0
+            return "", "", 0
 
     def _check_virustotal_hash(
         self, sha256: str, api_key: str, timeout: int,

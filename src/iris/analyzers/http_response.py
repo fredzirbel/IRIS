@@ -12,6 +12,48 @@ from iris.analyzers.base import BaseAnalyzer
 from iris.models import AnalyzerResult, AnalyzerStatus, Finding
 
 
+def _is_trivial_redirect(from_url: str, to_url: str) -> bool:
+    """Return True if the redirect is a routine, non-suspicious hop.
+
+    Covers two common cases that should not be flagged:
+      1. HTTP → HTTPS upgrade on the same host and path.
+      2. Bare domain ↔ ``www.`` subdomain on the same registered domain
+         and path (e.g. ``twitch.tv`` → ``www.twitch.tv``).
+
+    These may be combined (``http://twitch.tv`` → ``https://www.twitch.tv``).
+
+    Args:
+        from_url: The URL before the redirect.
+        to_url: The URL after the redirect.
+
+    Returns:
+        True when the hop is trivial and should be ignored.
+    """
+    a = urlparse(from_url)
+    b = urlparse(to_url)
+
+    # Normalise paths so a trailing slash doesn't cause a false mismatch
+    path_a = a.path.rstrip("/") or "/"
+    path_b = b.path.rstrip("/") or "/"
+
+    if path_a != path_b or a.query != b.query:
+        return False
+
+    host_a = a.hostname or ""
+    host_b = b.hostname or ""
+
+    # Strip optional "www." prefix for comparison
+    bare_a = host_a.removeprefix("www.")
+    bare_b = host_b.removeprefix("www.")
+
+    if bare_a.lower() != bare_b.lower():
+        return False
+
+    # At this point hosts differ only by www. prefix (or are identical)
+    # and the path + query are the same.  Accept any scheme combination.
+    return True
+
+
 class HTTPResponseAnalyzer(BaseAnalyzer):
     """Analyze HTTP response behavior for phishing indicators.
 
@@ -79,16 +121,28 @@ class HTTPResponseAnalyzer(BaseAnalyzer):
         redirect_findings = self._check_redirect_chain(response, url)
         findings.extend(redirect_findings)
 
-        # Store redirect chain as a special finding for the scanner to extract
+        # Store redirect chain as a special finding for the scanner to extract.
+        # Filter out trivial hops (http→https, bare→www) so only
+        # meaningful redirects surface in the UI.
         if response.history:
-            chain = [r.url for r in response.history] + [response.url]
-            findings.append(
-                Finding(
-                    description=f"Redirect chain: {' -> '.join(chain)}",
-                    score_contribution=0.0,
-                    severity="info",
+            raw_chain = [r.url for r in response.history] + [response.url]
+            chain: list[str] = [raw_chain[0]]
+            for hop in raw_chain[1:]:
+                if not _is_trivial_redirect(chain[-1], hop):
+                    chain.append(hop)
+                else:
+                    # Replace the previous endpoint with the upgraded URL
+                    chain[-1] = hop
+
+            # Only record the chain if there are real (non-trivial) hops
+            if len(chain) > 1:
+                findings.append(
+                    Finding(
+                        description=f"Redirect chain: {' -> '.join(chain)}",
+                        score_contribution=0.0,
+                        severity="info",
+                    )
                 )
-            )
 
         # Analyze headers
         header_findings = self._check_suspicious_headers(response)
@@ -114,6 +168,10 @@ class HTTPResponseAnalyzer(BaseAnalyzer):
     ) -> list[Finding]:
         """Analyze the redirect chain for suspicious behavior.
 
+        Trivial hops (http→https upgrades, bare-domain ↔ www) are
+        filtered out before any scoring so they don't inflate redirect
+        counts or trigger false-positive cross-domain findings.
+
         Args:
             response: The final HTTP response (after redirects).
             original_url: The URL that was originally requested.
@@ -127,7 +185,18 @@ class HTTPResponseAnalyzer(BaseAnalyzer):
         if not history:
             return findings
 
-        num_redirects = len(history)
+        # Build a de-trivialised chain of meaningful hops
+        raw_chain = [original_url] + [r.url for r in history] + [response.url]
+        chain: list[str] = [raw_chain[0]]
+        for hop in raw_chain[1:]:
+            if not _is_trivial_redirect(chain[-1], hop):
+                chain.append(hop)
+            else:
+                chain[-1] = hop
+
+        # Number of *meaningful* redirects (hops minus the origin)
+        num_redirects = len(chain) - 1
+
         if num_redirects > 3:
             findings.append(
                 Finding(
@@ -137,22 +206,23 @@ class HTTPResponseAnalyzer(BaseAnalyzer):
                 )
             )
 
-        # Check for cross-domain redirects
-        original_domain = tldextract.extract(original_url).registered_domain
-        final_domain = tldextract.extract(response.url).registered_domain
+        # Check for cross-domain redirects (using meaningful endpoints)
+        if num_redirects >= 1:
+            original_domain = tldextract.extract(chain[0]).registered_domain
+            final_domain = tldextract.extract(chain[-1]).registered_domain
 
-        if original_domain and final_domain and original_domain != final_domain:
-            findings.append(
-                Finding(
-                    description=(
-                        f"Cross-domain redirect: {original_domain} -> {final_domain}"
-                    ),
-                    score_contribution=20.0,
-                    severity="high",
+            if original_domain and final_domain and original_domain != final_domain:
+                findings.append(
+                    Finding(
+                        description=(
+                            f"Cross-domain redirect: {original_domain} -> {final_domain}"
+                        ),
+                        score_contribution=20.0,
+                        severity="high",
+                    )
                 )
-            )
 
-        # Check for protocol downgrade (HTTPS -> HTTP)
+        # Check for protocol downgrade (HTTPS -> HTTP) across all raw hops
         for i, r in enumerate(history):
             next_url = history[i + 1].url if i + 1 < len(history) else response.url
             if urlparse(r.url).scheme == "https" and urlparse(next_url).scheme == "http":

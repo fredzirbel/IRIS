@@ -103,7 +103,10 @@ class URLLexicalAnalyzer(BaseAnalyzer):
         parts = extracted.subdomain.split(".")
         if len(parts) > 3:
             return Finding(
-                description=f"Excessive subdomain depth ({len(parts)} levels): {extracted.subdomain}",
+                description=(
+                    f"Excessive subdomain depth ({len(parts)} levels):"
+                    f" {extracted.subdomain}"
+                ),
                 score_contribution=20.0,
                 severity="medium",
             )

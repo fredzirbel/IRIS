@@ -10,20 +10,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from playwright.sync_api import sync_playwright, Browser, Playwright
+from playwright.sync_api import Browser, Playwright, sync_playwright
 
 from iris.analyzers import ALL_ANALYZERS
 from iris.browser import launch_browser
 from iris.models import (
     AnalyzerResult,
     AnalyzerStatus,
-    FeedResult,
-    FileDownloadInfo,
     RiskCategory,
     ScanReport,
 )
 from iris.scoring import calculate_score
-from iris.screenshot import capture_screenshot
+from iris.screenshot import capture_multi_screenshots, capture_screenshot
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +279,7 @@ def scan_url(
     if file_dl and file_dl.detected:
         if risk_category == RiskCategory.MALICIOUS:
             risk_category = RiskCategory.MALICIOUS_DOWNLOAD
+            confidence = 100.0  # VT-confirmed malicious download
         elif risk_category in (RiskCategory.UNCERTAIN, RiskCategory.SAFE):
             # An automatic file download is inherently anomalous — even if
             # nothing else is flagged, it should never be labelled "Safe".
@@ -289,6 +288,23 @@ def scan_url(
                 "thresholds", {},
             ).get("safe", 25) + 1
             overall_score = max(overall_score, float(safe_max))
+
+    # Capture multi-screenshots (initial + CTA click)
+    multi_screenshots: dict[str, str | None] = {
+        "initial": None,
+        "initial_url": None,
+        "cta": None,
+        "cta_url": None,
+        "cta_text": None,
+    }
+    if screenshot_dir and not passive_only:
+        try:
+            multi_screenshots = capture_multi_screenshots(
+                url, Path(screenshot_dir), config, browser=shared_browser,
+            )
+            _emit(on_event, "multi_screenshots", multi_screenshots)
+        except Exception as exc:
+            logger.error("Multi-screenshot capture failed: %s", exc)
 
     recommendation = _build_recommendation(risk_category)
 
@@ -313,6 +329,7 @@ def scan_url(
         screenshot_path=screenshot_path,
         discovered_links=scan_meta["discovered_links"],
         file_download=scan_meta["file_download"],
+        multi_screenshots=multi_screenshots,
     )
 
 
@@ -501,16 +518,15 @@ def _build_recommendation(category: RiskCategory) -> str:
             "Proceed with caution and verify the source before interacting."
         ),
         RiskCategory.MALICIOUS: (
-            "This URL is classified as malicious based on multiple security signals. "
-            "Do NOT enter any credentials or personal information."
+            "This URL is classified as malicious based on multiple security signals."
         ),
         RiskCategory.MALICIOUS_DOWNLOAD: (
             "This URL delivers a file download flagged as malicious. "
-            "Do NOT open the downloaded file. Quarantine and investigate."
+            "Quarantine and investigate."
         ),
         RiskCategory.SUSPICIOUS_DOWNLOAD: (
             "This URL delivers a suspicious file download. "
-            "Do NOT open the file without analyzing it in a sandbox first."
+            "Recommend sandbox analysis before interaction."
         ),
     }
     return recommendations.get(category, "Unable to determine risk level.")

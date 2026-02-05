@@ -16,7 +16,6 @@ from iris.feeds.google_safebrowsing import GoogleSafeBrowsingFeed
 from iris.feeds.virustotal import VirusTotalFeed
 from iris.models import AnalyzerResult, AnalyzerStatus, FeedResult, Finding
 
-
 _FEED_DISPLAY_ORDER: dict[str, int] = {
     "VirusTotal": 1,
     "AbuseIPDB": 2,
@@ -91,8 +90,10 @@ class ThreatFeedAnalyzer(BaseAnalyzer):
             fr.display_order = _FEED_DISPLAY_ORDER.get(fr.feed_name, 99)
         self.last_feed_results = feed_results
 
-        matches = sum(1 for fr in feed_results if fr.matched)
-        score = min(100.0, matches * 50.0) if matches > 0 else 0.0
+        # Score scales with number of matched feeds AND detection severity.
+        # A single VT match with 10+ detections should score much higher
+        # than a single match with 3 detections.
+        score = self._compute_feed_score(feed_results)
 
         return AnalyzerResult(
             analyzer_name=self.name,
@@ -101,6 +102,45 @@ class ThreatFeedAnalyzer(BaseAnalyzer):
             max_weight=self.weight,
             findings=findings,
         )
+
+    @staticmethod
+    def _compute_feed_score(feed_results: list[FeedResult]) -> float:
+        """Compute the analyzer score based on feed matches and severity.
+
+        Scales the score by VirusTotal detection count so that a URL
+        flagged by 10+ VT engines scores much higher than one with 3.
+
+        Args:
+            feed_results: List of FeedResult from all feeds.
+
+        Returns:
+            Analyzer score on a 0-100 scale.
+        """
+        matches = sum(1 for fr in feed_results if fr.matched)
+        if matches == 0:
+            return 0.0
+
+        # Base: each matched feed contributes 40 points (was 50)
+        base = min(100.0, matches * 40.0)
+
+        # VT severity multiplier based on detection count
+        vt_boost = 0.0
+        for fr in feed_results:
+            if fr.feed_name == "VirusTotal" and fr.matched and fr.raw_response:
+                malicious = fr.raw_response.get("malicious", 0)
+                suspicious = fr.raw_response.get("suspicious", 0)
+                detections = malicious + suspicious
+
+                if detections >= 20:
+                    vt_boost = 60.0
+                elif detections >= 10:
+                    vt_boost = 45.0
+                elif detections >= 5:
+                    vt_boost = 25.0
+                elif detections >= 3:
+                    vt_boost = 10.0
+
+        return min(100.0, base + vt_boost)
 
     def _check_feed(
         self, feed: Any, url: str, domain: str, ip: str | None

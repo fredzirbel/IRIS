@@ -25,7 +25,10 @@ _POSSIBLE_CONFIG_PATHS = [
     Path.cwd() / "config" / "default.yaml",  # Current working directory
 ]
 
-DEFAULT_CONFIG_PATH = next((p for p in _POSSIBLE_CONFIG_PATHS if p.exists()), _POSSIBLE_CONFIG_PATHS[0])
+DEFAULT_CONFIG_PATH = next(
+    (p for p in _POSSIBLE_CONFIG_PATHS if p.exists()),
+    _POSSIBLE_CONFIG_PATHS[0],
+)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

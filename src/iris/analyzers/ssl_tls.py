@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import ssl
 import socket
+import ssl
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -12,7 +12,6 @@ import tldextract
 
 from iris.analyzers.base import BaseAnalyzer
 from iris.models import AnalyzerResult, AnalyzerStatus, Finding
-
 
 # Certificate issuers commonly used by free/automated CAs
 FREE_CERT_ISSUERS = [

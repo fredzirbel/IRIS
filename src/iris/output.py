@@ -14,9 +14,10 @@ console = Console(force_terminal=True)
 
 CATEGORY_COLORS = {
     RiskCategory.SAFE: "green",
-    RiskCategory.SUSPICIOUS: "yellow",
-    RiskCategory.LIKELY_PHISHING: "red",
-    RiskCategory.CONFIRMED_PHISHING: "bold red",
+    RiskCategory.UNCERTAIN: "yellow",
+    RiskCategory.MALICIOUS: "bold red",
+    RiskCategory.MALICIOUS_DOWNLOAD: "bold red",
+    RiskCategory.SUSPICIOUS_DOWNLOAD: "red",
 }
 
 STATUS_SYMBOLS = {
@@ -63,12 +64,12 @@ def _render_header(report: ScanReport) -> None:
 
 
 def _render_score_panel(report: ScanReport) -> None:
-    """Render the overall risk score and category."""
+    """Render the classification and confidence percentage."""
     color = CATEGORY_COLORS.get(report.risk_category, "white")
-    score_text = Text(f"{report.overall_score}", style=f"bold {color}")
-    category_text = Text(f" / 100  -  {report.risk_category.value}", style=color)
+    confidence_text = Text(f"{report.confidence:.0f}%", style=f"bold {color}")
+    category_text = Text(f"  {report.risk_category.value}", style=color)
 
-    content = Text.assemble("Risk Score: ", score_text, category_text)
+    content = Text.assemble("Confidence: ", confidence_text, category_text)
 
     console.print(Panel(content, border_style=color))
 

@@ -15,9 +15,15 @@ scoring:
     page_content: 15
     threat_feeds: 20
   thresholds:
-    safe: 15
-    suspicious: 35
-    likely_phishing: 55
+    safe: 25
+    malicious: 60
+  blend:
+    analyzer_weight: 0.45
+    feed_weight: 0.55
+  feed_weights:
+    VirusTotal: 40
+    Google Safe Browsing: 35
+    AbuseIPDB: 25
 
 requests:
   timeout: 10

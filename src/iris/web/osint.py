@@ -5,11 +5,14 @@ from __future__ import annotations
 import base64
 from urllib.parse import quote
 
+import tldextract
+
 
 def generate_osint_links(
     url: str,
     domain: str,
     ip: str = "",
+    redirect_chain: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Build clickable OSINT links for external threat-intel tools.
 
@@ -17,6 +20,7 @@ def generate_osint_links(
         url: The full URL that was scanned.
         domain: The extracted domain (e.g. "example.com").
         ip: The resolved IP address, if available.
+        redirect_chain: Optional list of redirect hop URLs.
 
     Returns:
         A list of dicts with keys: name, url, icon_class, description.
@@ -69,14 +73,41 @@ def generate_osint_links(
                 "description": "IP abuse confidence score",
             },
         )
-        links.insert(
-            3,
-            {
-                "name": "Shodan",
-                "url": f"https://www.shodan.io/host/{ip}",
-                "icon_class": "shodan",
-                "description": "Host exposure and open ports",
-            },
-        )
+
+    # Redirect chain OSINT — add VirusTotal links for each redirect hop
+    # that differs from the primary scanned URL.
+    if redirect_chain:
+        seen_urls: set[str] = {url.rstrip("/")}
+        seen_domains: set[str] = {domain.lower()}
+
+        for hop in redirect_chain:
+            hop_normalised = hop.rstrip("/")
+            hop_extracted = tldextract.extract(hop)
+            hop_domain = f"{hop_extracted.domain}.{hop_extracted.suffix}"
+
+            # Add VT URL link for each unique redirect hop
+            if hop_normalised not in seen_urls:
+                seen_urls.add(hop_normalised)
+                vt_hop_id = (
+                    base64.urlsafe_b64encode(hop.encode())
+                    .decode()
+                    .rstrip("=")
+                )
+                links.append({
+                    "name": f"VirusTotal (Redirect URL)",
+                    "url": f"https://www.virustotal.com/gui/url/{vt_hop_id}",
+                    "icon_class": "vt",
+                    "description": f"Redirect: {hop_domain}",
+                })
+
+            # Add VT domain link for each unique redirect domain
+            if hop_domain.lower() not in seen_domains and hop_domain != ".":
+                seen_domains.add(hop_domain.lower())
+                links.append({
+                    "name": f"VirusTotal (Redirect Domain)",
+                    "url": f"https://www.virustotal.com/gui/domain/{hop_domain}",
+                    "icon_class": "vt",
+                    "description": f"Redirect domain: {hop_domain}",
+                })
 
     return links

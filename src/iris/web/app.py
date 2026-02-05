@@ -27,6 +27,7 @@ from starlette.responses import StreamingResponse
 
 from iris.config import get_api_key, load_config
 from iris.scanner import scan_url, shutdown_browser
+from iris.web.defang import defang as defang_url
 from iris.web.osint import generate_osint_links
 
 # ---------------------------------------------------------------------------
@@ -39,10 +40,11 @@ _SCREENSHOT_DIR = _PROJECT_ROOT / "screenshots"
 # ---------------------------------------------------------------------------
 # Dedicated scan executor (single thread)
 # ---------------------------------------------------------------------------
-# All scans run on ONE thread so Playwright's greenlet-bound sync API
-# can keep a persistent browser alive between scans.
+# Each worker thread gets its own persistent Playwright browser via
+# thread-local storage (see scanner._get_browser).  This allows
+# concurrent scans while respecting Playwright's greenlet-bound API.
 _scan_executor = ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="iris-scan",
+    max_workers=3, thread_name_prefix="iris-scan",
 )
 
 # ---------------------------------------------------------------------------
@@ -54,13 +56,13 @@ _scan_executor = ThreadPoolExecutor(
 async def _lifespan(app: FastAPI):
     """FastAPI lifespan handler for startup/shutdown tasks.
 
-    On shutdown: close the persistent Playwright browser and the scan
-    executor thread.
+    On shutdown: close all persistent Playwright browsers across worker
+    threads and shut down the executor pool.
     """
     yield
-    # Shutdown: close persistent browser from within the scan thread
+    # Shutdown: close all browsers (shutdown_browser is thread-safe now)
     try:
-        _scan_executor.submit(shutdown_browser).result(timeout=10)
+        shutdown_browser()
     except Exception:
         pass
     _scan_executor.shutdown(wait=False)
@@ -91,6 +93,7 @@ def _sort_by_severity(findings: list) -> list:
 
 
 templates.env.filters["sort_by_severity"] = _sort_by_severity
+templates.env.filters["defang"] = defang_url
 
 
 def _filesizeformat(value: int) -> str:
@@ -123,7 +126,9 @@ app.mount("/screenshots", StaticFiles(directory=str(_SCREENSHOT_DIR)), name="scr
 # In-memory scan store with disk-backed cache
 # ---------------------------------------------------------------------------
 _scans: dict[str, dict[str, Any]] = {}
+_bulk_scans: dict[str, dict[str, Any]] = {}
 _CACHE_FILE = _SCREENSHOT_DIR / "scan_cache.json"
+_BULK_CACHE_FILE = _SCREENSHOT_DIR / "bulk_cache.json"
 _CACHE_TTL = 86400  # 24 hours in seconds
 
 logger = logging.getLogger(__name__)
@@ -182,6 +187,10 @@ def _deserialize_scans(entries: list[dict]) -> dict[str, dict[str, Any]]:
 
     # Build reverse lookup for enums
     _rc_map = {e.value: e for e in RiskCategory}
+    # Legacy compatibility for cached scans from before the scoring overhaul
+    _rc_map["Suspicious"] = RiskCategory.UNCERTAIN
+    _rc_map["Likely Phishing"] = RiskCategory.UNCERTAIN
+    _rc_map["Confirmed Phishing"] = RiskCategory.MALICIOUS
     _as_map = {e.value: e for e in AnalyzerStatus}
 
     scans = {}
@@ -227,6 +236,7 @@ def _deserialize_scans(entries: list[dict]) -> dict[str, dict[str, Any]]:
                 url=rd["url"],
                 overall_score=rd["overall_score"],
                 risk_category=_rc_map.get(rd["risk_category"], RiskCategory.SAFE),
+                confidence=rd.get("confidence", 50.0),
                 analyzer_results=analyzer_results,
                 feed_results=feed_results,
                 redirect_chain=rd.get("redirect_chain", []),
@@ -321,8 +331,66 @@ def _save_cache() -> None:
         logger.warning("Failed to save scan cache: %s", exc)
 
 
+# ---------------------------------------------------------------------------
+# Bulk scan session cache
+# ---------------------------------------------------------------------------
+
+
+def _load_bulk_cache() -> None:
+    """Load bulk scan sessions from disk."""
+    global _bulk_scans
+    if not _BULK_CACHE_FILE.exists():
+        return
+    try:
+        data = json.loads(_BULK_CACHE_FILE.read_text(encoding="utf-8"))
+        now = datetime.now(timezone.utc)
+        for bs in data:
+            try:
+                ts = datetime.fromisoformat(bs["created"])
+                if (now - ts).total_seconds() < _CACHE_TTL:
+                    _bulk_scans[bs["bulk_id"]] = bs
+            except (ValueError, TypeError, KeyError):
+                continue
+        logger.info("Loaded %d cached bulk session(s) from disk.", len(_bulk_scans))
+    except Exception as exc:
+        logger.warning("Failed to load bulk cache: %s", exc)
+
+
+def _save_bulk_cache() -> None:
+    """Persist bulk scan sessions to disk atomically."""
+    try:
+        now = datetime.now(timezone.utc)
+        pruned = {}
+        for bid, bs in _bulk_scans.items():
+            try:
+                ts = datetime.fromisoformat(bs["created"])
+                if (now - ts).total_seconds() < _CACHE_TTL:
+                    pruned[bid] = bs
+            except (ValueError, TypeError):
+                pruned[bid] = bs
+        payload = json.dumps(list(pruned.values()), default=str, ensure_ascii=False)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(_SCREENSHOT_DIR), suffix=".tmp", prefix="bulk_cache_",
+        )
+        closed = False
+        try:
+            os.write(fd, payload.encode("utf-8"))
+            os.close(fd)
+            closed = True
+            os.replace(tmp_path, str(_BULK_CACHE_FILE))
+        except Exception:
+            if not closed:
+                os.close(fd)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+    except Exception as exc:
+        logger.warning("Failed to save bulk cache: %s", exc)
+
+
 # Hydrate from disk on startup
 _load_cache()
+_load_bulk_cache()
 
 # ---------------------------------------------------------------------------
 # Configuration (loaded once at startup)
@@ -488,7 +556,16 @@ async def api_scan(request: Request) -> JSONResponse:
             )
 
             report.resolved_ip = ip
-            report.osint_links = osint_links
+
+            # Regenerate OSINT links now that we have the redirect chain
+            osint_final = generate_osint_links(
+                url, domain, ip,
+                redirect_chain=report.redirect_chain,
+            )
+            report.osint_links = osint_final
+
+            # Re-emit OSINT links so the streaming UI gets redirect entries
+            on_event("osint", {"links": osint_final})
 
             screenshot_filename = ""
             if report.screenshot_path:
@@ -590,6 +667,7 @@ async def results(request: Request, scan_id: str) -> HTMLResponse:
         The rendered results page, or an error page if scan_id is unknown.
     """
     streaming = request.query_params.get("stream") == "1"
+    bulk_id = request.query_params.get("bulk", "")
 
     if streaming:
         # Render skeleton — scan is likely still in progress
@@ -599,6 +677,7 @@ async def results(request: Request, scan_id: str) -> HTMLResponse:
                 "request": request,
                 "streaming": True,
                 "scan_id": scan_id,
+                "bulk_id": bulk_id,
             },
         )
 
@@ -610,11 +689,15 @@ async def results(request: Request, scan_id: str) -> HTMLResponse:
             status_code=404,
         )
 
+    report_json = json.dumps(_report_to_copydata(entry), default=str)
+
     return templates.TemplateResponse(
         "results.html",
         {
             "request": request,
             "streaming": False,
+            "report_json": report_json,
+            "bulk_id": bulk_id,
             **entry,
         },
     )
@@ -706,6 +789,283 @@ async def hash_lookup(request: Request) -> JSONResponse:
         "popular_threat_label": popular_threat_label,
         "threat_category": threat_category,
     })
+
+
+# ---------------------------------------------------------------------------
+# API: Get scan results as JSON
+# ---------------------------------------------------------------------------
+
+
+def _serialize_report(entry: dict[str, Any]) -> dict[str, Any]:
+    """Convert a scan store entry to a JSON-safe dict with defanged URLs.
+
+    Shared by the REST API endpoints to avoid duplicating serialisation logic.
+
+    Args:
+        entry: A scan store entry dict containing the ScanReport.
+
+    Returns:
+        JSON-serialisable dict with enum values as strings and defanged URLs.
+    """
+    report = entry["report"]
+    report_dict = asdict(report)
+    report_dict["risk_category"] = report.risk_category.value
+    for ar in report_dict["analyzer_results"]:
+        if hasattr(ar["status"], "value"):
+            ar["status"] = ar["status"].value
+
+    report_dict["defanged_url"] = defang_url(report.url)
+    report_dict["defanged_redirect_chain"] = [
+        defang_url(hop) for hop in report.redirect_chain
+    ]
+
+    return {
+        "scan_id": entry["scan_id"],
+        "domain": entry.get("domain", ""),
+        "ip": entry.get("ip", ""),
+        "report": report_dict,
+    }
+
+
+@app.get("/api/results/{scan_id}")
+async def api_results(scan_id: str) -> JSONResponse:
+    """Return completed scan results as structured JSON.
+
+    Intended for SOAR playbooks, automation scripts, and the bulk scan
+    "Copy All Reports" feature. Includes defanged URLs for safe sharing.
+
+    Args:
+        scan_id: The unique scan identifier.
+
+    Returns:
+        JSON representation of the ScanReport with defanged URLs.
+    """
+    entry = _scans.get(scan_id)
+    if entry is None:
+        return JSONResponse(
+            {"error": "Scan not found", "scan_id": scan_id},
+            status_code=404,
+        )
+
+    return JSONResponse(_serialize_report(entry))
+
+
+@app.post("/api/scan/sync")
+async def api_scan_sync(request: Request) -> JSONResponse:
+    """Run a synchronous scan and return complete JSON results.
+
+    Blocks until the scan finishes. Intended for SOAR playbooks and
+    automation scripts that need a single request/response cycle.
+
+    Callers should set an HTTP timeout of at least 120 seconds since
+    scans typically take 30-90 seconds.
+
+    Accepts JSON body: ``{"url": "https://example.com"}``
+
+    Args:
+        request: The incoming HTTP request with JSON body.
+
+    Returns:
+        JSON with full scan report including defanged URLs.
+    """
+    body = await request.json()
+    raw_url = (body.get("url") or "").strip()
+    if not raw_url:
+        return JSONResponse({"error": "URL required"}, status_code=400)
+
+    url = raw_url
+    if not url.startswith(("http://", "https://")):
+        url = f"https://{url}"
+
+    scan_id = uuid.uuid4().hex[:12]
+
+    extracted = tldextract.extract(url)
+    domain = f"{extracted.domain}.{extracted.suffix}"
+    ip = _resolve_ip(url)
+    osint_links = generate_osint_links(url, domain, ip)
+
+    loop = asyncio.get_event_loop()
+
+    def run_scan():
+        """Execute the scan on the dedicated executor thread."""
+        report = scan_url(
+            url=url,
+            config=_config,
+            passive_only=False,
+            screenshot_dir=str(_SCREENSHOT_DIR),
+        )
+        report.resolved_ip = ip
+        report.osint_links = generate_osint_links(
+            url, domain, ip,
+            redirect_chain=report.redirect_chain,
+        )
+        return report
+
+    try:
+        report = await loop.run_in_executor(_scan_executor, run_scan)
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Scan failed: {exc}"},
+            status_code=500,
+        )
+
+    screenshot_filename = ""
+    if report.screenshot_path:
+        screenshot_filename = Path(report.screenshot_path).name
+
+    _scans[scan_id] = {
+        "scan_id": scan_id,
+        "report": report,
+        "domain": domain,
+        "ip": ip,
+        "screenshot_filename": screenshot_filename,
+    }
+    _save_cache()
+
+    return JSONResponse(_serialize_report(_scans[scan_id]))
+
+
+# ---------------------------------------------------------------------------
+# Report data helper (for Copy Report feature)
+# ---------------------------------------------------------------------------
+
+
+def _report_to_copydata(entry: dict[str, Any]) -> dict[str, Any]:
+    """Build a JSON-safe dict of report data for the Copy Report feature.
+
+    Pre-serialises findings, feeds, and file download info for safe
+    embedding as a JSON blob in the template ``<script>`` tag.
+
+    Args:
+        entry: A scan store entry dict.
+
+    Returns:
+        Dict suitable for JSON serialisation and clipboard text construction.
+    """
+    report = entry["report"]
+
+    findings = []
+    for ar in report.analyzer_results:
+        if ar.status.value == "COMPLETED":
+            for f in ar.findings:
+                findings.append({
+                    "severity": f.severity,
+                    "description": f.description,
+                    "score": f.score_contribution,
+                })
+
+    feed_data = []
+    for fr in report.feed_results:
+        feed_data.append({
+            "feed_name": fr.feed_name,
+            "matched": fr.matched,
+            "details": fr.details,
+        })
+
+    file_dl = None
+    if report.file_download and report.file_download.detected:
+        file_dl = {
+            "filename": report.file_download.filename,
+            "sha256": report.file_download.sha256,
+            "vt_detections": report.file_download.vt_detections,
+            "vt_total_engines": report.file_download.vt_total_engines,
+            "popular_threat_label": report.file_download.popular_threat_label,
+        }
+
+    return {
+        "url": report.url,
+        "defanged_url": defang_url(report.url),
+        "risk_category": report.risk_category.value,
+        "confidence": report.confidence,
+        "timestamp": report.timestamp,
+        "ip": entry.get("ip", ""),
+        "domain": entry.get("domain", ""),
+        "recommendation": report.recommendation,
+        "redirect_chain": report.redirect_chain,
+        "feed_results": feed_data,
+        "findings": findings,
+        "file_download": file_dl,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bulk scan page
+# ---------------------------------------------------------------------------
+
+
+@app.get("/bulk", response_class=HTMLResponse)
+async def bulk_page(request: Request) -> HTMLResponse:
+    """Render the bulk scan page (new or resumed).
+
+    If a ``bulk_id`` query parameter is provided, the page will
+    automatically restore the corresponding cached session.
+
+    Args:
+        request: The incoming HTTP request.
+
+    Returns:
+        The bulk scan HTML page.
+    """
+    bulk_id = request.query_params.get("id", "")
+    bulk_data = None
+    if bulk_id and bulk_id in _bulk_scans:
+        bulk_data = json.dumps(_bulk_scans[bulk_id], default=str)
+
+    return templates.TemplateResponse(
+        "bulk.html",
+        {
+            "request": request,
+            "bulk_restore": bulk_data or "null",
+        },
+    )
+
+
+@app.post("/api/bulk")
+async def api_bulk_save(request: Request) -> JSONResponse:
+    """Create or update a bulk scan session.
+
+    Accepts JSON with bulk_id, scan entries, and URLs. Persists to
+    the bulk cache so sessions survive container restarts.
+
+    Args:
+        request: The incoming HTTP request with JSON body.
+
+    Returns:
+        JSON confirmation with the bulk_id.
+    """
+    body = await request.json()
+    bulk_id = body.get("bulk_id", "")
+    if not bulk_id:
+        bulk_id = uuid.uuid4().hex[:12]
+
+    _bulk_scans[bulk_id] = {
+        "bulk_id": bulk_id,
+        "urls": body.get("urls", []),
+        "results": body.get("results", []),
+        "created": body.get("created", datetime.now(timezone.utc).isoformat()),
+    }
+    _save_bulk_cache()
+
+    return JSONResponse({"bulk_id": bulk_id})
+
+
+@app.get("/api/bulk/{bulk_id}")
+async def api_bulk_get(bulk_id: str) -> JSONResponse:
+    """Retrieve a cached bulk scan session.
+
+    Args:
+        bulk_id: The unique bulk session identifier.
+
+    Returns:
+        JSON with the bulk session data, or 404.
+    """
+    bs = _bulk_scans.get(bulk_id)
+    if bs is None:
+        return JSONResponse(
+            {"error": "Bulk session not found", "bulk_id": bulk_id},
+            status_code=404,
+        )
+    return JSONResponse(bs)
 
 
 # ---------------------------------------------------------------------------

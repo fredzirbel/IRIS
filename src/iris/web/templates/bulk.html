@@ -1,0 +1,434 @@
+{% extends "base.html" %}
+
+{% block title %}IRIS &mdash; Bulk Scan{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <h1>Bulk Scan</h1>
+    <p>Paste multiple URLs (one per line) to scan them sequentially.</p>
+
+    <div class="bulk-form">
+        <textarea id="bulk-urls" class="bulk-textarea" rows="6"
+            placeholder="https://example1.com&#10;https://example2.com&#10;https://example3.com"></textarea>
+        <button type="button" class="btn btn-primary" id="bulk-start" onclick="startBulkScan()">
+            Start Bulk Scan
+        </button>
+    </div>
+</section>
+
+<section class="card" id="bulk-progress" style="display:none;">
+    <h2 style="margin-bottom: 0.75rem;">Scan Progress</h2>
+    <div class="bulk-status-bar">
+        <span id="bulk-status-text">0 / 0 complete</span>
+        <div class="progress-bar">
+            <div class="progress-fill" id="bulk-progress-bar" style="width:0%"></div>
+        </div>
+    </div>
+    <table class="table">
+        <thead>
+            <tr>
+                <th style="width:40px">#</th>
+                <th>URL</th>
+                <th style="width:100px">Status</th>
+                <th style="width:120px">Risk</th>
+                <th style="width:90px">Confidence</th>
+                <th style="width:70px"></th>
+            </tr>
+        </thead>
+        <tbody id="bulk-tbody"></tbody>
+    </table>
+    <div class="actions" id="bulk-actions" style="display:none;">
+        <button type="button" class="btn btn-secondary" id="bulk-copy-all"
+                onclick="copyAllReports()">Copy All Reports</button>
+    </div>
+</section>
+
+<script>
+(function () {
+    "use strict";
+
+    var bulkQueue = [];
+    var bulkResults = [];
+    var bulkIndex = 0;
+    var bulkId = "";
+    var bulkCreated = "";
+    var _saving = false;  /* debounce API saves */
+
+    function esc(s) {
+        var el = document.createElement("span");
+        el.textContent = s || "";
+        return el.innerHTML;
+    }
+
+    function defang(url) {
+        if (!url) return "";
+        var s = url;
+        s = s.replace(/^https:\/\//i, "hxxps://");
+        s = s.replace(/^http:\/\//i, "hxxp://");
+        s = s.replace(/^ftp:\/\//i, "fxp://");
+        var match = s.match(/^(hxxps?:\/\/|fxp:\/\/)/i);
+        if (match) {
+            var after = s.substring(match[0].length);
+            var slashIdx = after.indexOf("/");
+            if (slashIdx === -1) {
+                s = match[0] + after.replace(/\./g, "[.]");
+            } else {
+                var domain = after.substring(0, slashIdx);
+                var path = after.substring(slashIdx);
+                s = match[0] + domain.replace(/\./g, "[.]") + path;
+            }
+        } else {
+            var slashIdx = s.indexOf("/");
+            if (slashIdx === -1) {
+                s = s.replace(/\./g, "[.]");
+            } else {
+                var domain = s.substring(0, slashIdx);
+                var path = s.substring(slashIdx);
+                s = domain.replace(/\./g, "[.]") + path;
+            }
+        }
+        return s;
+    }
+
+    function generateId() {
+        /* Generate a 12-char hex ID (matches server-side uuid.uuid4().hex[:12]) */
+        var hex = "";
+        for (var j = 0; j < 12; j++) {
+            hex += Math.floor(Math.random() * 16).toString(16);
+        }
+        return hex;
+    }
+
+    function saveBulkSession() {
+        /* Persist the current bulk session to the server-side cache. */
+        if (_saving || !bulkId) return;
+        _saving = true;
+
+        var serialisedResults = [];
+        for (var j = 0; j < bulkResults.length; j++) {
+            serialisedResults.push(bulkResults[j] ? {
+                scan_id: bulkResults[j].scan_id || null,
+                risk_category: bulkResults[j].risk_category || null,
+                confidence: bulkResults[j].confidence || null,
+                error: bulkResults[j].error || false,
+            } : null);
+        }
+
+        fetch("/api/bulk", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+                bulk_id: bulkId,
+                urls: bulkQueue,
+                results: serialisedResults,
+                created: bulkCreated,
+            }),
+        })
+        .catch(function () { /* Ignore save errors silently */ })
+        .then(function () { _saving = false; });
+    }
+
+    function updateRow(i, status, risk, confidence, scanId) {
+        var tr = document.getElementById("bulk-row-" + i);
+        if (!tr) return;
+        var cells = tr.children;
+
+        if (status === "scanning") {
+            cells[2].innerHTML = '<span class="badge" style="background:#1e1b4b;color:#818cf8;">Scanning</span>';
+        } else if (status === "done") {
+            var catMap = {
+                "Safe": "safe", "Uncertain": "uncertain", "Malicious": "malicious",
+                "Malicious File Download": "malicious_download",
+                "Suspicious File Download": "suspicious_download"
+            };
+            var cls = catMap[risk] || "safe";
+            cells[2].innerHTML = '<span class="badge badge-status-completed">Done</span>';
+            cells[3].innerHTML = '<span class="badge badge-' + cls + '">' + esc(risk) + '</span>';
+            cells[4].textContent = confidence ? confidence.toFixed(0) + "%" : "--";
+            cells[5].innerHTML = scanId
+                ? '<a href="/results/' + esc(scanId) + '?bulk=' + esc(bulkId) + '" class="btn btn-sm">View</a>'
+                : '';
+        } else if (status === "error") {
+            cells[2].innerHTML = '<span class="badge badge-status-error">Error</span>';
+        }
+    }
+
+    var MAX_CONCURRENT = 3;  /* matches server-side max_workers */
+    var activeScans = 0;
+
+    function updateProgress() {
+        var done = bulkResults.filter(function (r) { return r !== null; }).length;
+        document.getElementById("bulk-status-text").textContent =
+            done + " / " + bulkQueue.length + " complete";
+        document.getElementById("bulk-progress-bar").style.width =
+            ((done / bulkQueue.length) * 100) + "%";
+
+        /* Persist progress to server cache */
+        saveBulkSession();
+
+        /* Check if ALL scans are done */
+        if (done >= bulkQueue.length) {
+            document.getElementById("bulk-actions").style.display = "";
+            document.getElementById("bulk-start").disabled = false;
+            document.getElementById("bulk-urls").disabled = false;
+        }
+    }
+
+    function launchNextScans() {
+        while (activeScans < MAX_CONCURRENT && bulkIndex < bulkQueue.length) {
+            launchScan(bulkIndex);
+            bulkIndex++;
+        }
+    }
+
+    function onScanDone() {
+        activeScans--;
+        launchNextScans();
+    }
+
+    function launchScan(i) {
+        var url = bulkQueue[i];
+        activeScans++;
+        updateRow(i, "scanning", null, null, null);
+
+        fetch("/api/scan", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({url: url}),
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (!data.scan_id) {
+                updateRow(i, "error", null, null, null);
+                bulkResults[i] = {error: true};
+                updateProgress();
+                onScanDone();
+                return;
+            }
+
+            var scanId = data.scan_id;
+            var es = new EventSource("/stream/" + scanId);
+
+            es.addEventListener("score", function (e) {
+                var d = JSON.parse(e.data);
+                bulkResults[i] = {
+                    scan_id: scanId,
+                    risk_category: d.risk_category,
+                    confidence: d.confidence,
+                };
+            });
+
+            es.addEventListener("already_complete", function () {
+                es.close();
+                fetch("/api/results/" + scanId)
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        var rpt = data.report;
+                        bulkResults[i] = {
+                            scan_id: scanId,
+                            risk_category: rpt.risk_category,
+                            confidence: rpt.confidence,
+                        };
+                        updateRow(i, "done", rpt.risk_category, rpt.confidence, scanId);
+                        updateProgress();
+                        onScanDone();
+                    })
+                    .catch(function () {
+                        updateRow(i, "error", null, null, null);
+                        bulkResults[i] = {error: true};
+                        updateProgress();
+                        onScanDone();
+                    });
+            });
+
+            es.addEventListener("complete", function () {
+                es.close();
+                var result = bulkResults[i];
+                if (result && result.scan_id) {
+                    updateRow(i, "done", result.risk_category, result.confidence, scanId);
+                } else {
+                    bulkResults[i] = {scan_id: scanId, risk_category: "Unknown", confidence: 0};
+                    updateRow(i, "done", "Unknown", 0, scanId);
+                }
+                updateProgress();
+                onScanDone();
+            });
+
+            es.addEventListener("error", function (e) {
+                if (e.data) {
+                    es.close();
+                    updateRow(i, "error", null, null, null);
+                    bulkResults[i] = {error: true};
+                    updateProgress();
+                    onScanDone();
+                }
+            });
+        })
+        .catch(function () {
+            updateRow(i, "error", null, null, null);
+            bulkResults[i] = {error: true};
+            updateProgress();
+            onScanDone();
+        });
+    }
+
+    window.startBulkScan = function () {
+        var text = document.getElementById("bulk-urls").value.trim();
+        if (!text) return;
+
+        var urls = text.split("\n")
+            .map(function (u) { return u.trim(); })
+            .filter(function (u) { return u.length > 0; });
+
+        if (urls.length === 0) return;
+        if (urls.length > 50) {
+            alert("Maximum 50 URLs per batch.");
+            return;
+        }
+
+        bulkQueue = urls;
+        bulkResults = new Array(urls.length).fill(null);
+        bulkIndex = 0;
+
+        /* Generate a session ID and timestamp for caching */
+        bulkId = generateId();
+        bulkCreated = new Date().toISOString();
+        window.history.replaceState(null, "", "/bulk?id=" + bulkId);
+
+        var tbody = document.getElementById("bulk-tbody");
+        tbody.innerHTML = "";
+        urls.forEach(function (url, i) {
+            var tr = document.createElement("tr");
+            tr.id = "bulk-row-" + i;
+            tr.innerHTML =
+                '<td>' + (i + 1) + '</td>' +
+                '<td class="url-cell">' + esc(defang(url)) + '</td>' +
+                '<td><span class="badge badge-status-skipped">Queued</span></td>' +
+                '<td>--</td><td>--</td><td></td>';
+            tbody.appendChild(tr);
+        });
+
+        document.getElementById("bulk-progress").style.display = "";
+        document.getElementById("bulk-actions").style.display = "none";
+        document.getElementById("bulk-start").disabled = true;
+        document.getElementById("bulk-urls").disabled = true;
+
+        /* Persist initial session to cache */
+        saveBulkSession();
+
+        launchNextScans();
+    };
+
+    /* ---------------------------------------------------------------
+     * Restore a cached bulk session when the page loads with ?id=
+     * --------------------------------------------------------------- */
+    var _bulkRestore = {{ bulk_restore|safe }};
+    if (_bulkRestore && _bulkRestore.bulk_id) {
+        bulkId = _bulkRestore.bulk_id;
+        bulkCreated = _bulkRestore.created || "";
+        bulkQueue = _bulkRestore.urls || [];
+        var cachedResults = _bulkRestore.results || [];
+
+        if (bulkQueue.length > 0) {
+            bulkResults = new Array(bulkQueue.length).fill(null);
+
+            var tbody = document.getElementById("bulk-tbody");
+            tbody.innerHTML = "";
+            bulkQueue.forEach(function (url, i) {
+                var tr = document.createElement("tr");
+                tr.id = "bulk-row-" + i;
+                tr.innerHTML =
+                    '<td>' + (i + 1) + '</td>' +
+                    '<td class="url-cell">' + esc(defang(url)) + '</td>' +
+                    '<td><span class="badge badge-status-skipped">Queued</span></td>' +
+                    '<td>--</td><td>--</td><td></td>';
+                tbody.appendChild(tr);
+            });
+
+            /* Apply cached results to each row */
+            var doneCount = 0;
+            for (var j = 0; j < cachedResults.length; j++) {
+                var cr = cachedResults[j];
+                if (!cr) continue;
+                bulkResults[j] = cr;
+                doneCount++;
+                if (cr.error) {
+                    updateRow(j, "error", null, null, null);
+                } else if (cr.scan_id) {
+                    updateRow(j, "done", cr.risk_category, cr.confidence, cr.scan_id);
+                }
+            }
+
+            /* Show the progress section */
+            document.getElementById("bulk-progress").style.display = "";
+            document.getElementById("bulk-status-text").textContent =
+                doneCount + " / " + bulkQueue.length + " complete";
+            document.getElementById("bulk-progress-bar").style.width =
+                ((doneCount / bulkQueue.length) * 100) + "%";
+
+            /* Show Copy All button if all scans are done */
+            if (doneCount >= bulkQueue.length) {
+                document.getElementById("bulk-actions").style.display = "";
+            }
+
+            /* Pre-fill textarea with the URLs for context */
+            document.getElementById("bulk-urls").value = bulkQueue.join("\n");
+        }
+    }
+
+    window.copyAllReports = function () {
+        var pending = [];
+        for (var i = 0; i < bulkResults.length; i++) {
+            var result = bulkResults[i];
+            if (!result || result.error || !result.scan_id) continue;
+            pending.push(
+                fetch("/api/results/" + result.scan_id).then(function (r) { return r.json(); })
+            );
+        }
+
+        Promise.all(pending).then(function (results) {
+            var allText = [];
+            results.forEach(function (data) {
+                if (!data.report) return;
+                var rpt = data.report;
+                var lines = [];
+                lines.push("=== IRIS Scan Report ===");
+                lines.push("URL (defanged): " + (rpt.defanged_url || defang(rpt.url)));
+                lines.push("Classification: " + rpt.risk_category + " (" + rpt.confidence.toFixed(0) + "% confidence)");
+                lines.push("Scanned: " + rpt.timestamp);
+                if (data.ip) lines.push("Resolved IP: " + defang(data.ip));
+                lines.push("Domain: " + (data.domain || ""));
+                lines.push("");
+                lines.push("--- Recommendation ---");
+                lines.push(rpt.recommendation);
+
+                if (rpt.feed_results && rpt.feed_results.length) {
+                    lines.push("");
+                    lines.push("--- Threat Feed Results ---");
+                    rpt.feed_results.forEach(function (f) {
+                        var tag = f.matched ? "[MATCH]" : "[CLEAR]";
+                        lines.push(tag + " " + f.feed_name + ": " + (f.details || "No details"));
+                    });
+                }
+
+                if (rpt.redirect_chain && rpt.redirect_chain.length) {
+                    lines.push("");
+                    lines.push("--- Redirect Chain (" + rpt.redirect_chain.length + " hops) ---");
+                    lines.push(rpt.redirect_chain.map(function (h) { return defang(h); }).join(" -> "));
+                }
+
+                lines.push("");
+                lines.push("=== End IRIS Report ===");
+                allText.push(lines.join("\n"));
+            });
+
+            navigator.clipboard.writeText(allText.join("\n\n---\n\n")).then(function () {
+                var btn = document.getElementById("bulk-copy-all");
+                btn.textContent = "Copied!";
+                setTimeout(function () { btn.textContent = "Copy All Reports"; }, 2000);
+            });
+        });
+    };
+})();
+</script>
+{% endblock %}

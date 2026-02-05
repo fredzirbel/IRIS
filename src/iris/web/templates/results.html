@@ -428,7 +428,7 @@
         if (info.vt_total_engines > 0) {
             var badgeCls = info.vt_detections > 0 ? "badge-vt-malicious" : "badge-vt-clean";
             html += '<span class="badge ' + badgeCls + '">' + info.vt_detections + '/' + info.vt_total_engines + ' engines</span>';
-            if (info.popular_threat_label) html += ' <span class="vt-threat-label">' + esc(info.popular_threat_label) + '</span>';
+            if (info.popular_threat_label) html += ' <a href="https://malpedia.caad.fkie.fraunhofer.de/search?q=' + encodeURIComponent(info.popular_threat_label) + '" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search Malpedia for ' + esc(info.popular_threat_label) + '">' + esc(info.popular_threat_label) + '</a>';
             if (info.threat_category) html += ' <span class="badge badge-threat-category">' + esc(info.threat_category) + '</span>';
         } else if (info.vt_link) {
             html += '<span class="badge badge-vt-unknown">Not in database</span>';
@@ -539,9 +539,11 @@
         /* Show Copy Report button */
         var copyBtn = document.getElementById("copy-report-btn");
         if (copyBtn) copyBtn.style.display = "";
-        /* Show SOC Workflow section */
+        /* Show SOC Workflow section (phishing only, not download verdicts) */
         var socSection = document.getElementById("section-soc-workflow");
-        if (socSection) socSection.style.display = "";
+        var isDownload = _reportData.riskCategory === "Malicious File Download" ||
+                         _reportData.riskCategory === "Suspicious File Download";
+        if (socSection && !isDownload) socSection.style.display = "";
     });
 
     /* ---- error ---- */
@@ -898,7 +900,7 @@
                                 <span class="badge badge-vt-clean">0/{{ r.file_download.vt_total_engines }} engines</span>
                                 {% endif %}
                                 {% if r.file_download.popular_threat_label %}
-                                <span class="vt-threat-label">{{ r.file_download.popular_threat_label }}</span>
+                                <a href="https://malpedia.caad.fkie.fraunhofer.de/search?q={{ r.file_download.popular_threat_label | urlencode }}" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search Malpedia for {{ r.file_download.popular_threat_label }}">{{ r.file_download.popular_threat_label }}</a>
                                 {% endif %}
                                 {% if r.file_download.threat_category %}
                                 <span class="badge badge-threat-category">{{ r.file_download.threat_category }}</span>
@@ -1011,7 +1013,7 @@
                             const badgeCls = det > 0 ? 'badge-vt-malicious' : 'badge-vt-clean';
                             let vtHtml = '<span class="badge ' + badgeCls + '">' + det + '/' + total + ' engines</span>';
                             if (data.popular_threat_label) {
-                                vtHtml += ' <span class="vt-threat-label">' + data.popular_threat_label + '</span>';
+                                vtHtml += ' <a href="https://malpedia.caad.fkie.fraunhofer.de/search?q=' + encodeURIComponent(data.popular_threat_label) + '" target="_blank" rel="noopener noreferrer" class="vt-threat-label" title="Search Malpedia for ' + data.popular_threat_label + '">' + data.popular_threat_label + '</a>';
                             }
                             if (data.threat_category) {
                                 vtHtml += ' <span class="badge badge-threat-category">' + data.threat_category + '</span>';
@@ -1132,7 +1134,8 @@
 </section>
 {% endif %}
 
-<!-- SOC Workflow: Alert Context + Escalation + KQL -->
+<!-- SOC Workflow: Alert Context + Escalation + KQL (phishing only, not downloads) -->
+{% if cat not in ('malicious_download', 'suspicious_download') %}
 <section class="card escalation-section">
     <details open>
         <summary class="section-toggle">SOC Workflow</summary>
@@ -1200,6 +1203,7 @@
         </div>
     </details>
 </section>
+{% endif %}
 
 <!-- Analyzer Breakdown -->
 <section class="card">

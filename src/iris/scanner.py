@@ -281,6 +281,7 @@ def scan_url(
     if file_dl and file_dl.detected:
         if risk_category == RiskCategory.MALICIOUS:
             risk_category = RiskCategory.MALICIOUS_DOWNLOAD
+            confidence = 100.0  # VT-confirmed malicious download
         elif risk_category in (RiskCategory.UNCERTAIN, RiskCategory.SAFE):
             # An automatic file download is inherently anomalous — even if
             # nothing else is flagged, it should never be labelled "Safe".
@@ -519,16 +520,15 @@ def _build_recommendation(category: RiskCategory) -> str:
             "Proceed with caution and verify the source before interacting."
         ),
         RiskCategory.MALICIOUS: (
-            "This URL is classified as malicious based on multiple security signals. "
-            "Do NOT enter any credentials or personal information."
+            "This URL is classified as malicious based on multiple security signals."
         ),
         RiskCategory.MALICIOUS_DOWNLOAD: (
             "This URL delivers a file download flagged as malicious. "
-            "Do NOT open the downloaded file. Quarantine and investigate."
+            "Quarantine and investigate."
         ),
         RiskCategory.SUSPICIOUS_DOWNLOAD: (
             "This URL delivers a suspicious file download. "
-            "Do NOT open the file without analyzing it in a sandbox first."
+            "Recommend sandbox analysis before interaction."
         ),
     }
     return recommendations.get(category, "Unable to determine risk level.")

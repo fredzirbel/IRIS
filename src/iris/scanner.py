@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,20 +46,24 @@ _DEFERRED_BROWSER_ANALYZERS = {
 }
 
 # ---------------------------------------------------------------------------
-# Persistent browser cache
+# Thread-local browser pool
 # ---------------------------------------------------------------------------
-# These globals are ONLY accessed from the single scan executor thread
-# (ThreadPoolExecutor(max_workers=1) in app.py), so no lock is needed.
+# Each scan executor thread gets its own Playwright + Browser instance.
+# Playwright's sync API is greenlet-bound to a single thread, so sharing
+# a browser across threads causes segfaults.  Thread-local storage ensures
+# each worker has an independent, persistent browser.
 
-_cached_pw: Playwright | None = None
-_cached_browser: Browser | None = None
+_tls = threading.local()
+_all_browsers_lock = threading.Lock()
+_all_browsers: list[tuple[Playwright, Browser]] = []
 
 
 def _get_browser(url: str) -> tuple[Playwright, Browser]:
-    """Return the cached Playwright + Browser, creating them if needed.
+    """Return the thread-local Playwright + Browser, creating them if needed.
 
-    If the cached browser has crashed, it is automatically restarted.
-    Thread-safety: only called from the single scan executor thread.
+    Each worker thread in the scan executor pool maintains its own
+    persistent browser.  If the cached browser has crashed, it is
+    automatically restarted.
 
     Args:
         url: The URL to scan (used for initial DNS resolution on launch).
@@ -66,47 +71,65 @@ def _get_browser(url: str) -> tuple[Playwright, Browser]:
     Returns:
         Tuple of (Playwright, Browser).
     """
-    global _cached_pw, _cached_browser
+    pw = getattr(_tls, "pw", None)
+    browser = getattr(_tls, "browser", None)
 
-    if _cached_pw is not None and _cached_browser is not None:
+    if pw is not None and browser is not None:
         try:
             # Health check — access a property to see if the browser is alive
-            _ = _cached_browser.contexts
-            return _cached_pw, _cached_browser
+            _ = browser.contexts
+            return pw, browser
         except Exception:
-            logger.warning("Cached browser is dead, restarting…")
-            _close_browser()
+            logger.warning("Thread-local browser is dead, restarting…")
+            _close_thread_browser()
 
-    _cached_pw = sync_playwright().start()
-    _cached_browser = launch_browser(_cached_pw, url)
-    return _cached_pw, _cached_browser
+    pw = sync_playwright().start()
+    browser = launch_browser(pw, url)
+    _tls.pw = pw
+    _tls.browser = browser
+
+    with _all_browsers_lock:
+        _all_browsers.append((pw, browser))
+
+    return pw, browser
 
 
-def _close_browser() -> None:
-    """Close the cached browser and stop Playwright.
+def _close_thread_browser() -> None:
+    """Close the thread-local browser and stop Playwright.
 
-    Safe to call even if nothing is cached.
+    Safe to call even if nothing is cached on this thread.
     """
-    global _cached_pw, _cached_browser
+    browser = getattr(_tls, "browser", None)
+    pw = getattr(_tls, "pw", None)
 
-    if _cached_browser is not None:
+    if browser is not None:
         try:
-            _cached_browser.close()
+            browser.close()
         except Exception:
             pass
-        _cached_browser = None
+        _tls.browser = None
 
-    if _cached_pw is not None:
+    if pw is not None:
         try:
-            _cached_pw.stop()
+            pw.stop()
         except Exception:
             pass
-        _cached_pw = None
+        _tls.pw = None
 
 
 def shutdown_browser() -> None:
-    """Public API to close the persistent browser on app shutdown."""
-    _close_browser()
+    """Close all browsers across all worker threads on app shutdown."""
+    with _all_browsers_lock:
+        for pw, browser in _all_browsers:
+            try:
+                browser.close()
+            except Exception:
+                pass
+            try:
+                pw.stop()
+            except Exception:
+                pass
+        _all_browsers.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -247,31 +270,32 @@ def scan_url(
 
     screenshot_path = scan_meta.get("screenshot_path", "")
 
-    overall_score, risk_category = calculate_score(
+    overall_score, risk_category, confidence = calculate_score(
         analyzer_results, scan_meta["feed_results"], config,
     )
 
-    # Override generic "phishing" labels when the primary threat is a file
-    # download — "Malicious File Download" or "Suspicious File Download"
-    # is more accurate than "Confirmed Phishing" for payload-delivery URLs.
+    # Override generic labels when the primary threat is a file download —
+    # "Malicious File Download" or "Suspicious File Download" is more
+    # accurate than "Malicious" for payload-delivery URLs.
     file_dl = scan_meta.get("file_download")
     if file_dl and file_dl.detected:
-        if risk_category in (RiskCategory.CONFIRMED_PHISHING, RiskCategory.LIKELY_PHISHING):
+        if risk_category == RiskCategory.MALICIOUS:
             risk_category = RiskCategory.MALICIOUS_DOWNLOAD
-        elif risk_category in (RiskCategory.SUSPICIOUS, RiskCategory.SAFE):
+        elif risk_category in (RiskCategory.UNCERTAIN, RiskCategory.SAFE):
             # An automatic file download is inherently anomalous — even if
             # nothing else is flagged, it should never be labelled "Safe".
             risk_category = RiskCategory.SUSPICIOUS_DOWNLOAD
-            suspicious_floor = config.get("scoring", {}).get(
+            safe_max = config.get("scoring", {}).get(
                 "thresholds", {},
             ).get("safe", 25) + 1
-            overall_score = max(overall_score, float(suspicious_floor))
+            overall_score = max(overall_score, float(safe_max))
 
     recommendation = _build_recommendation(risk_category)
 
     # Emit final score event
     _emit(on_event, "score", {
         "overall_score": overall_score,
+        "confidence": confidence,
         "risk_category": risk_category.value,
         "recommendation": recommendation,
     })
@@ -280,6 +304,7 @@ def scan_url(
         url=url,
         overall_score=overall_score,
         risk_category=risk_category,
+        confidence=confidence,
         analyzer_results=analyzer_results,
         feed_results=scan_meta["feed_results"],
         redirect_chain=scan_meta["redirect_chain"],
@@ -471,16 +496,13 @@ def _build_recommendation(category: RiskCategory) -> str:
     """
     recommendations = {
         RiskCategory.SAFE: "This URL appears safe. No immediate action required.",
-        RiskCategory.SUSPICIOUS: (
-            "This URL shows some suspicious indicators. "
+        RiskCategory.UNCERTAIN: (
+            "This URL shows mixed signals. "
             "Proceed with caution and verify the source before interacting."
         ),
-        RiskCategory.LIKELY_PHISHING: (
-            "This URL is likely a phishing attempt. "
+        RiskCategory.MALICIOUS: (
+            "This URL is classified as malicious based on multiple security signals. "
             "Do NOT enter any credentials or personal information."
-        ),
-        RiskCategory.CONFIRMED_PHISHING: (
-            "This URL is confirmed malicious by threat intelligence feeds."
         ),
         RiskCategory.MALICIOUS_DOWNLOAD: (
             "This URL delivers a file download flagged as malicious. "

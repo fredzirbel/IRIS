@@ -23,6 +23,16 @@
     <p id="recommendation-text"></p>
 </section>
 
+<!-- Action buttons at top -->
+<div class="actions">
+    <a href="/" class="btn btn-primary">New Scan</a>
+    <button type="button" class="btn btn-secondary" id="copy-report-btn"
+            style="display:none;" onclick="copyReport()">Copy Report</button>
+    {% if bulk_id %}
+    <a href="/bulk?id={{ bulk_id }}" class="btn btn-secondary">Back to Bulk Scan</a>
+    {% endif %}
+</div>
+
 <!-- Screenshot -->
 <section class="card" id="section-screenshot">
     <details open>
@@ -30,6 +40,14 @@
         <div class="section-body" id="screenshot-body">
             <div class="skeleton-loading">Capturing screenshot&hellip;</div>
         </div>
+    </details>
+</section>
+
+<!-- Redirect Chain (hidden until data) -->
+<section class="card" id="section-redirect" style="display:none;">
+    <details open>
+        <summary class="section-toggle">Redirect Chain</summary>
+        <div class="section-body" id="redirect-body"></div>
     </details>
 </section>
 
@@ -94,14 +112,6 @@
     </details>
 </section>
 
-<!-- Redirect Chain (hidden until data) -->
-<section class="card" id="section-redirect" style="display:none;">
-    <details open>
-        <summary class="section-toggle">Redirect Chain</summary>
-        <div class="section-body" id="redirect-body"></div>
-    </details>
-</section>
-
 <!-- Scan Metadata -->
 <section class="card" id="section-metadata">
     <details>
@@ -112,10 +122,6 @@
     </details>
 </section>
 
-<div class="actions">
-    <a href="/" class="btn btn-primary">New Scan</a>
-</div>
-
 <script>
 (function () {
     "use strict";
@@ -123,11 +129,57 @@
     var scanId = "{{ scan_id }}";
     var es = new EventSource("/stream/" + scanId);
 
+    /* ---- Report data accumulator for Copy Report ---- */
+    var _reportData = {
+        url: "", defangedUrl: "", riskCategory: "", confidence: 0,
+        timestamp: "", ip: "", domain: "", recommendation: "",
+        redirectChain: [], feedResults: [], findings: [], fileDownload: null
+    };
+
     /* ---- Helper: escape HTML entities ---- */
     function esc(s) {
         var el = document.createElement("span");
         el.textContent = s || "";
         return el.innerHTML;
+    }
+
+    /* ---- Helper: defang a URL for safe display ---- */
+    function defang(url) {
+        if (!url) return "";
+        var s = url;
+        s = s.replace(/^https:\/\//i, "hxxps://");
+        s = s.replace(/^http:\/\//i, "hxxp://");
+        s = s.replace(/^ftp:\/\//i, "fxp://");
+        var match = s.match(/^(hxxps?:\/\/|fxp:\/\/)/i);
+        if (match) {
+            var after = s.substring(match[0].length);
+            var slashIdx = after.indexOf("/");
+            if (slashIdx === -1) {
+                s = match[0] + after.replace(/\./g, "[.]");
+            } else {
+                var domain = after.substring(0, slashIdx);
+                var path = after.substring(slashIdx);
+                s = match[0] + domain.replace(/\./g, "[.]") + path;
+            }
+        } else {
+            var slashIdx = s.indexOf("/");
+            if (slashIdx === -1) {
+                s = s.replace(/\./g, "[.]");
+            } else {
+                var domain = s.substring(0, slashIdx);
+                var path = s.substring(slashIdx);
+                s = domain.replace(/\./g, "[.]") + path;
+            }
+        }
+        return s;
+    }
+
+    /* ---- Helper: inline copy button HTML ---- */
+    function copyBtnHtml(text) {
+        var el = document.createElement("span");
+        el.textContent = text;
+        var encoded = el.innerHTML.replace(/"/g, "&quot;");
+        return '<button class="copy-chip" data-copy="' + encoded + '" title="Copy">&#128203;</button>';
     }
 
     /* ---- already_complete: redirect to static results ---- */
@@ -139,11 +191,17 @@
     /* ---- metadata ---- */
     es.addEventListener("metadata", function (e) {
         var d = JSON.parse(e.data);
-        document.getElementById("score-url").textContent = d.url || "";
+        document.getElementById("score-url").textContent = defang(d.url || "");
         var html = "<p><strong>Scan ID:</strong> " + esc(d.scan_id) + "</p>" +
             "<p><strong>Domain:</strong> " + esc(d.domain) + "</p>" +
             (d.ip ? "<p><strong>Resolved IP:</strong> " + esc(d.ip) + "</p>" : "");
         document.getElementById("metadata-content").innerHTML = html;
+
+        _reportData.url = d.url || "";
+        _reportData.defangedUrl = defang(d.url || "");
+        _reportData.domain = d.domain || "";
+        _reportData.ip = d.ip || "";
+        _reportData.timestamp = new Date().toISOString();
     });
 
     /* ---- osint ---- */
@@ -200,6 +258,17 @@
             '<td>' + Math.round(r.max_weight) + '</td>';
         tbody.appendChild(tr);
 
+        /* Accumulate findings for Copy Report */
+        if (r.status === "COMPLETED" && r.findings) {
+            r.findings.forEach(function (f) {
+                _reportData.findings.push({
+                    severity: f.severity,
+                    description: f.description,
+                    score: f.score_contribution
+                });
+            });
+        }
+
         /* If this is Link Discovery, also render the discovered links section */
         if (r.analyzer_name === "Link Discovery Analysis" && r.findings) {
             /* Link discovery data comes via a separate event — handled below */
@@ -238,13 +307,17 @@
         feeds.forEach(function (f) {
             var cls = f.matched ? ' class="feed-match"' : '';
             var badge = f.matched
-                ? '<span class="badge badge-confirmed_phishing">MATCH</span>'
+                ? '<span class="badge badge-malicious">MATCH</span>'
                 : '<span class="badge badge-status-skipped">Not Found</span>';
             html += '<tr' + cls + '><td>' + esc(f.feed_name) + '</td><td>' + badge + '</td>' +
                 '<td>' + esc(f.details || "\u2014") + '</td></tr>';
         });
         html += '</tbody></table>';
         document.getElementById("feeds-body").innerHTML = html;
+
+        _reportData.feedResults = d.feeds.map(function (f) {
+            return {feed_name: f.feed_name, matched: f.matched, details: f.details || ""};
+        });
     });
 
     /* ---- file_download ---- */
@@ -258,7 +331,7 @@
         /* Filename */
         html += '<div class="file-dl-filename">';
         if (info.filename) {
-            html += '<span class="file-dl-filename-label">File name:</span> ' + esc(info.filename);
+            html += '<span class="file-dl-filename-label">File name:</span> ' + esc(info.filename) + copyBtnHtml(info.filename);
         } else {
             html += '<span class="muted" style="font-weight:400;">Unknown filename</span>';
         }
@@ -271,7 +344,7 @@
         html += '<div class="file-dl-details">';
         html += '<div class="file-dl-row"><span class="file-dl-key">SHA-256</span><span class="file-dl-val">';
         if (info.sha256) {
-            html += '<code class="hash-value">' + esc(info.sha256) + '</code>';
+            html += '<code class="hash-value">' + esc(info.sha256) + '</code>' + copyBtnHtml(info.sha256);
         } else {
             html += '<span class="muted">Could not compute hash</span>';
         }
@@ -311,6 +384,14 @@
         html += '</div></div>';
 
         document.getElementById("download-body").innerHTML = html;
+
+        _reportData.fileDownload = {
+            filename: info.filename || "",
+            sha256: info.sha256 || "",
+            vt_detections: info.vt_detections || 0,
+            vt_total_engines: info.vt_total_engines || 0,
+            popular_threat_label: info.popular_threat_label || ""
+        };
     });
 
     /* ---- redirect_chain ---- */
@@ -320,11 +401,13 @@
         document.getElementById("section-redirect").style.display = "";
         var html = '<div class="redirect-chain">';
         d.chain.forEach(function (hop, i) {
-            html += '<span class="redirect-hop">' + esc(hop) + '</span>';
+            html += '<span class="redirect-hop">' + esc(defang(hop)) + copyBtnHtml(hop) + '</span>';
             if (i < d.chain.length - 1) html += '<span class="redirect-arrow">&rarr;</span>';
         });
         html += '</div>';
         document.getElementById("redirect-body").innerHTML = html;
+
+        _reportData.redirectChain = d.chain || [];
     });
 
     /* ---- score ---- */
@@ -333,9 +416,8 @@
         /* Map risk category value to CSS class */
         var catMap = {
             "Safe": "safe",
-            "Suspicious": "suspicious",
-            "Likely Phishing": "likely_phishing",
-            "Confirmed Phishing": "confirmed_phishing",
+            "Uncertain": "uncertain",
+            "Malicious": "malicious",
             "Malicious File Download": "malicious_download",
             "Suspicious File Download": "suspicious_download"
         };
@@ -343,13 +425,17 @@
 
         var banner = document.getElementById("score-banner");
         banner.className = "score-banner score-" + catClass;
-        document.getElementById("score-value").textContent = d.overall_score.toFixed(1);
+        document.getElementById("score-value").textContent = d.confidence.toFixed(0) + "%";
         document.getElementById("score-label").textContent = d.risk_category;
 
         var rec = document.getElementById("recommendation");
         rec.style.display = "";
         rec.className = "recommendation rec-" + catClass;
         document.getElementById("recommendation-text").textContent = d.recommendation;
+
+        _reportData.riskCategory = d.risk_category;
+        _reportData.confidence = d.confidence;
+        _reportData.recommendation = d.recommendation;
     });
 
     /* ---- complete ---- */
@@ -358,6 +444,9 @@
         /* Remove any leftover loading indicators */
         var loaders = document.querySelectorAll(".skeleton-loading");
         loaders.forEach(function (el) { el.remove(); });
+        /* Show Copy Report button */
+        var copyBtn = document.getElementById("copy-report-btn");
+        if (copyBtn) copyBtn.style.display = "";
     });
 
     /* ---- error ---- */
@@ -367,6 +456,79 @@
             var d = JSON.parse(e.data);
             alert("Scan error: " + (d.message || "Unknown error"));
         }
+    });
+    /* ---- Expose copyReport to global scope ---- */
+    window.copyReport = function () {
+        var d = _reportData;
+        var lines = [];
+        lines.push("=== IRIS Scan Report ===");
+        lines.push("URL (defanged): " + d.defangedUrl);
+        lines.push("Classification: " + d.riskCategory + " (" + d.confidence.toFixed(0) + "% confidence)");
+        lines.push("Scanned: " + d.timestamp);
+        if (d.ip) lines.push("Resolved IP: " + defang(d.ip));
+        lines.push("Domain: " + d.domain);
+        lines.push("");
+        lines.push("--- Recommendation ---");
+        lines.push(d.recommendation);
+
+        if (d.feedResults.length) {
+            lines.push("");
+            lines.push("--- Threat Feed Results ---");
+            d.feedResults.forEach(function (f) {
+                var tag = f.matched ? "[MATCH]" : "[CLEAR]";
+                lines.push(tag + " " + f.feed_name + ": " + (f.details || "No details"));
+            });
+        }
+
+        if (d.redirectChain.length) {
+            lines.push("");
+            lines.push("--- Redirect Chain (" + d.redirectChain.length + " hops) ---");
+            lines.push(d.redirectChain.map(function (h) { return defang(h); }).join(" -> "));
+        }
+
+        if (d.findings.length) {
+            lines.push("");
+            lines.push("--- Key Findings ---");
+            var sevOrder = {critical: 0, high: 1, medium: 2, low: 3, info: 4};
+            var sorted = d.findings.slice().sort(function (a, b) {
+                return (sevOrder[a.severity] || 5) - (sevOrder[b.severity] || 5);
+            });
+            sorted.forEach(function (f) {
+                lines.push("[" + f.severity.toUpperCase() + "] " + f.description + " (+" + Math.round(f.score) + ")");
+            });
+        }
+
+        if (d.fileDownload) {
+            lines.push("");
+            lines.push("--- File Download ---");
+            if (d.fileDownload.filename) lines.push("Filename: " + d.fileDownload.filename);
+            if (d.fileDownload.sha256) lines.push("SHA-256: " + d.fileDownload.sha256);
+            if (d.fileDownload.vt_total_engines > 0) {
+                var vtLine = "VirusTotal: " + d.fileDownload.vt_detections + "/" + d.fileDownload.vt_total_engines + " engines";
+                if (d.fileDownload.popular_threat_label) vtLine += " (" + d.fileDownload.popular_threat_label + ")";
+                lines.push(vtLine);
+            }
+        }
+
+        lines.push("");
+        lines.push("=== End IRIS Report ===");
+
+        navigator.clipboard.writeText(lines.join("\n")).then(function () {
+            var btn = document.getElementById("copy-report-btn");
+            btn.textContent = "Copied!";
+            setTimeout(function () { btn.textContent = "Copy Report"; }, 2000);
+        });
+    };
+
+    /* ---- Delegated click handler for .copy-chip buttons ---- */
+    document.addEventListener("click", function (e) {
+        var btn = e.target.closest(".copy-chip");
+        if (!btn) return;
+        var text = btn.getAttribute("data-copy") || "";
+        navigator.clipboard.writeText(text).then(function () {
+            btn.textContent = "\u2713";
+            setTimeout(function () { btn.textContent = "\uD83D\uDCCB"; }, 1200);
+        });
     });
 })();
 </script>
@@ -380,15 +542,24 @@
 
 <!-- Score Banner -->
 <section class="score-banner score-{{ cat }}">
-    <div class="score-value">{{ "%.1f" | format(r.overall_score) }}</div>
+    <div class="score-value">{{ "%.0f" | format(r.confidence) }}%</div>
     <div class="score-label">{{ r.risk_category.value }}</div>
-    <div class="score-url">{{ r.url }}</div>
+    <div class="score-url">{{ r.url|defang }}</div>
 </section>
 
 <!-- Recommendation -->
 <section class="recommendation rec-{{ cat }}">
     <p>{{ r.recommendation }}</p>
 </section>
+
+<!-- Action buttons at top -->
+<div class="actions">
+    <a href="/" class="btn btn-primary">New Scan</a>
+    <button type="button" class="btn btn-secondary" id="copy-report-btn" onclick="copyReport()">Copy Report</button>
+    {% if bulk_id %}
+    <a href="/bulk?id={{ bulk_id }}" class="btn btn-secondary">Back to Bulk Scan</a>
+    {% endif %}
+</div>
 
 <!-- Screenshot -->
 <section class="card">
@@ -410,6 +581,25 @@
     </details>
 </section>
 
+<!-- Redirect Chain -->
+{% if r.redirect_chain %}
+<section class="card">
+    <details open>
+        <summary class="section-toggle">Redirect Chain</summary>
+        <div class="section-body">
+            <div class="redirect-chain">
+                {% for hop in r.redirect_chain %}
+                    <span class="redirect-hop">{{ hop|defang }}<button class="copy-chip" data-copy="{{ hop }}" title="Copy">&#128203;</button></span>
+                    {% if not loop.last %}
+                    <span class="redirect-arrow">&rarr;</span>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+    </details>
+</section>
+{% endif %}
+
 <!-- URL Threat Feed Matches -->
 {% if r.feed_results %}
 <section class="card">
@@ -430,7 +620,7 @@
                         <td>{{ f.feed_name }}</td>
                         <td>
                             {% if f.matched %}
-                            <span class="badge badge-confirmed_phishing">MATCH</span>
+                            <span class="badge badge-malicious">MATCH</span>
                             {% else %}
                             <span class="badge badge-status-skipped">Not Found</span>
                             {% endif %}
@@ -463,7 +653,7 @@
                 <!-- Filename header -->
                 <div class="file-dl-filename">
                     {% if r.file_download.filename %}
-                        <span class="file-dl-filename-label">File name:</span> {{ r.file_download.filename }}
+                        <span class="file-dl-filename-label">File name:</span> {{ r.file_download.filename }}<button class="copy-chip" data-copy="{{ r.file_download.filename }}" title="Copy">&#128203;</button>
                     {% elif r.file_download.cloudflare_blocked %}
                         <span class="muted" style="font-weight:400;">Unknown filename &mdash; hidden behind Cloudflare interstitial</span>
                     {% else %}
@@ -480,7 +670,7 @@
                         <span class="file-dl-key">SHA-256</span>
                         <span class="file-dl-val">
                             {% if r.file_download.sha256 %}
-                            <code class="hash-value">{{ r.file_download.sha256 }}</code>
+                            <code class="hash-value">{{ r.file_download.sha256 }}</code><button class="copy-chip" data-copy="{{ r.file_download.sha256 }}" title="Copy">&#128203;</button>
                             {% else %}
                             <span class="muted" id="hash-empty-msg">
                                 {% if r.file_download.cloudflare_blocked %}
@@ -668,7 +858,7 @@
                     {% for dl in r.discovered_links %}
                     <tr class="{% if dl.has_credential_form %}feed-match{% endif %}">
                         <td>"{{ dl.element_text }}"</td>
-                        <td class="url-cell">{{ dl.destination_url }}</td>
+                        <td class="url-cell">{{ dl.destination_url|defang }}<button class="copy-chip" data-copy="{{ dl.destination_url }}" title="Copy">&#128203;</button></td>
                         <td class="discovery-flags">
                             {% if dl.is_cross_domain %}
                             <span class="flag flag-warning">Cross-domain</span>
@@ -768,25 +958,6 @@
     </details>
 </section>
 
-<!-- Redirect Chain -->
-{% if r.redirect_chain %}
-<section class="card">
-    <details open>
-        <summary class="section-toggle">Redirect Chain</summary>
-        <div class="section-body">
-            <div class="redirect-chain">
-                {% for hop in r.redirect_chain %}
-                    <span class="redirect-hop">{{ hop }}</span>
-                    {% if not loop.last %}
-                    <span class="redirect-arrow">&rarr;</span>
-                    {% endif %}
-                {% endfor %}
-            </div>
-        </div>
-    </details>
-</section>
-{% endif %}
-
 <!-- Metadata -->
 <section class="card">
     <details>
@@ -800,9 +971,116 @@
     </details>
 </section>
 
-<div class="actions">
-    <a href="/" class="btn btn-primary">New Scan</a>
-</div>
+<script>
+(function () {
+    "use strict";
+
+    var _reportData = {{ report_json|safe }};
+
+    function defang(url) {
+        if (!url) return "";
+        var s = url;
+        s = s.replace(/^https:\/\//i, "hxxps://");
+        s = s.replace(/^http:\/\//i, "hxxp://");
+        s = s.replace(/^ftp:\/\//i, "fxp://");
+        var match = s.match(/^(hxxps?:\/\/|fxp:\/\/)/i);
+        if (match) {
+            var after = s.substring(match[0].length);
+            var slashIdx = after.indexOf("/");
+            if (slashIdx === -1) {
+                s = match[0] + after.replace(/\./g, "[.]");
+            } else {
+                var domain = after.substring(0, slashIdx);
+                var path = after.substring(slashIdx);
+                s = match[0] + domain.replace(/\./g, "[.]") + path;
+            }
+        } else {
+            var slashIdx = s.indexOf("/");
+            if (slashIdx === -1) {
+                s = s.replace(/\./g, "[.]");
+            } else {
+                var domain = s.substring(0, slashIdx);
+                var path = s.substring(slashIdx);
+                s = domain.replace(/\./g, "[.]") + path;
+            }
+        }
+        return s;
+    }
+
+    window.copyReport = function () {
+        var d = _reportData;
+        var lines = [];
+        lines.push("=== IRIS Scan Report ===");
+        lines.push("URL (defanged): " + d.defanged_url);
+        lines.push("Classification: " + d.risk_category + " (" + d.confidence.toFixed(0) + "% confidence)");
+        lines.push("Scanned: " + d.timestamp);
+        if (d.ip) lines.push("Resolved IP: " + defang(d.ip));
+        lines.push("Domain: " + d.domain);
+        lines.push("");
+        lines.push("--- Recommendation ---");
+        lines.push(d.recommendation);
+
+        if (d.feed_results && d.feed_results.length) {
+            lines.push("");
+            lines.push("--- Threat Feed Results ---");
+            d.feed_results.forEach(function (f) {
+                var tag = f.matched ? "[MATCH]" : "[CLEAR]";
+                lines.push(tag + " " + f.feed_name + ": " + (f.details || "No details"));
+            });
+        }
+
+        if (d.redirect_chain && d.redirect_chain.length) {
+            lines.push("");
+            lines.push("--- Redirect Chain (" + d.redirect_chain.length + " hops) ---");
+            lines.push(d.redirect_chain.map(function (h) { return defang(h); }).join(" -> "));
+        }
+
+        if (d.findings && d.findings.length) {
+            lines.push("");
+            lines.push("--- Key Findings ---");
+            var sevOrder = {critical: 0, high: 1, medium: 2, low: 3, info: 4};
+            var sorted = d.findings.slice().sort(function (a, b) {
+                return (sevOrder[a.severity] || 5) - (sevOrder[b.severity] || 5);
+            });
+            sorted.forEach(function (f) {
+                lines.push("[" + f.severity.toUpperCase() + "] " + f.description + " (+" + Math.round(f.score) + ")");
+            });
+        }
+
+        if (d.file_download) {
+            lines.push("");
+            lines.push("--- File Download ---");
+            if (d.file_download.filename) lines.push("Filename: " + d.file_download.filename);
+            if (d.file_download.sha256) lines.push("SHA-256: " + d.file_download.sha256);
+            if (d.file_download.vt_total_engines > 0) {
+                var vtLine = "VirusTotal: " + d.file_download.vt_detections + "/" + d.file_download.vt_total_engines + " engines";
+                if (d.file_download.popular_threat_label) vtLine += " (" + d.file_download.popular_threat_label + ")";
+                lines.push(vtLine);
+            }
+        }
+
+        lines.push("");
+        lines.push("=== End IRIS Report ===");
+
+        navigator.clipboard.writeText(lines.join("\n")).then(function () {
+            var btn = document.getElementById("copy-report-btn");
+            btn.textContent = "Copied!";
+            setTimeout(function () { btn.textContent = "Copy Report"; }, 2000);
+        });
+    };
+
+    /* ---- Delegated click handler for .copy-chip buttons ---- */
+    document.addEventListener("click", function (e) {
+        var btn = e.target.closest(".copy-chip");
+        if (!btn) return;
+        var text = btn.getAttribute("data-copy") || "";
+        navigator.clipboard.writeText(text).then(function () {
+            btn.textContent = "\u2713";
+            setTimeout(function () { btn.textContent = "\uD83D\uDCCB"; }, 1200);
+        });
+    });
+})();
+</script>
 {% endif %}
 
 {% endblock %}

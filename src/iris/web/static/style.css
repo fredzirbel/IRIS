@@ -290,9 +290,8 @@ details[open] > .section-toggle::before {
 }
 
 .score-safe              { background: #052e16; color: var(--green); }
-.score-suspicious        { background: #422006; color: var(--yellow); }
-.score-likely_phishing   { background: #431407; color: var(--orange); }
-.score-confirmed_phishing{ background: #450a0a; color: var(--red); }
+.score-uncertain         { background: #422006; color: var(--yellow); }
+.score-malicious         { background: #450a0a; color: var(--red); }
 .score-malicious_download{ background: #450a0a; color: var(--red); }
 .score-suspicious_download{ background: #431407; color: var(--orange); }
 
@@ -306,9 +305,8 @@ details[open] > .section-toggle::before {
 }
 
 .rec-safe              { background: #052e16; border-left: 4px solid var(--green); color: var(--green); }
-.rec-suspicious        { background: #422006; border-left: 4px solid var(--yellow); color: var(--yellow); }
-.rec-likely_phishing   { background: #431407; border-left: 4px solid var(--orange); color: var(--orange); }
-.rec-confirmed_phishing{ background: #450a0a; border-left: 4px solid var(--red); color: var(--red); }
+.rec-uncertain         { background: #422006; border-left: 4px solid var(--yellow); color: var(--yellow); }
+.rec-malicious         { background: #450a0a; border-left: 4px solid var(--red); color: var(--red); }
 .rec-malicious_download{ background: #450a0a; border-left: 4px solid var(--red); color: var(--red); }
 .rec-suspicious_download{ background: #431407; border-left: 4px solid var(--orange); color: var(--orange); }
 
@@ -324,9 +322,8 @@ details[open] > .section-toggle::before {
 }
 
 .badge-safe              { background: #052e16; color: var(--green); }
-.badge-suspicious        { background: #422006; color: var(--yellow); }
-.badge-likely_phishing   { background: #431407; color: var(--orange); }
-.badge-confirmed_phishing{ background: #450a0a; color: var(--red); }
+.badge-uncertain         { background: #422006; color: var(--yellow); }
+.badge-malicious         { background: #450a0a; color: var(--red); }
 .badge-malicious_download{ background: #450a0a; color: var(--red); }
 .badge-suspicious_download{ background: #431407; color: var(--orange); }
 
@@ -783,10 +780,51 @@ details summary:hover {
     color: #86efac;
 }
 
+/* ---- Copy chip (inline copy button) ---- */
+
+.copy-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin-left: 6px;
+    padding: 0;
+    font-size: 0.72rem;
+    line-height: 1;
+    vertical-align: middle;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.copy-chip:hover {
+    background: var(--border);
+    color: #fff;
+}
+
+/* ---- Buttons: secondary ---- */
+
+.btn-secondary {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text);
+}
+
+.btn-secondary:hover {
+    background: var(--border);
+    color: #fff;
+}
+
 /* ---- Actions row ---- */
 
 .actions {
-    text-align: center;
+    display: flex;
+    justify-content: center;
+    gap: 0.75rem;
     margin: 1.5rem 0;
 }
 
@@ -881,4 +919,89 @@ details summary:hover {
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
     margin: 0 auto;
+}
+
+/* ---- Nav link ---- */
+
+.nav-link {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: color 0.2s;
+}
+
+.nav-link:hover {
+    color: var(--accent);
+}
+
+/* ---- Bulk Scan CTA (home page) ---- */
+
+.bulk-cta {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 1.75rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--border);
+}
+
+.bulk-cta-text {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+.btn-bulk-cta {
+    padding: 0.5rem 1.25rem;
+    font-size: 0.88rem;
+}
+
+/* ---- Bulk Scan ---- */
+
+.bulk-textarea {
+    width: 100%;
+    max-width: 640px;
+    margin: 0 auto 1rem;
+    display: block;
+    padding: 0.75rem 1rem;
+    font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+    font-size: 0.9rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    outline: none;
+    resize: vertical;
+}
+
+.bulk-textarea:focus {
+    border-color: var(--accent);
+}
+
+.bulk-form {
+    text-align: center;
+}
+
+.bulk-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    font-size: 0.88rem;
+    color: var(--text-muted);
+}
+
+.progress-bar {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-input);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.3s ease;
 }

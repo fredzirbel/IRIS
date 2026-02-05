@@ -10,9 +10,8 @@ class RiskCategory(Enum):
     """Overall risk classification for a scanned URL."""
 
     SAFE = "Safe"
-    SUSPICIOUS = "Suspicious"
-    LIKELY_PHISHING = "Likely Phishing"
-    CONFIRMED_PHISHING = "Confirmed Phishing"
+    UNCERTAIN = "Uncertain"
+    MALICIOUS = "Malicious"
     MALICIOUS_DOWNLOAD = "Malicious File Download"
     SUSPICIOUS_DOWNLOAD = "Suspicious File Download"
 
@@ -96,6 +95,7 @@ class ScanReport:
     url: str
     overall_score: float
     risk_category: RiskCategory
+    confidence: float
     analyzer_results: list[AnalyzerResult]
     feed_results: list[FeedResult]
     redirect_chain: list[str]

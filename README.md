@@ -26,7 +26,8 @@ IRIS scans URLs across 8 security dimensions simultaneously — lexical analysis
 - **Playwright-based Screenshot Capture** with URL banner overlay and redirect detection
 - **Active Link Discovery** — clicks sign-in/login buttons to find hidden credential harvesters
 - **File Download Analysis** — detects automatic downloads, computes SHA-256, queries VirusTotal
-- **Threat Feed Integration** — VirusTotal, Google Safe Browsing, AbuseIPDB
+- **Threat Feed Integration** — VirusTotal (severity-aware detection scaling), Google Safe Browsing, AbuseIPDB
+- **Malpedia Threat Labels** — VT threat labels link directly to Malpedia for malware family research
 - **OSINT Link Panel** — one-click links to VirusTotal (including redirect hops), URLScan.io, AbuseIPDB, and more
 - **Cloudflare Bypass** — navigates past Cloudflare phishing interstitials for analysis
 - **DNS-over-HTTPS Fallback** — resolves domains blocked by ISP/router DNS filters
@@ -88,7 +89,7 @@ docker run -p 8000:8000 --shm-size=2g \
 
 ## Scoring
 
-IRIS uses a **dual-signal scoring engine** that blends analyzer scores (45%) with threat feed results (55%) into a final 0–100 risk score. Each result includes a **confidence percentage** (50–99%) reflecting the strength and diversity of evidence.
+IRIS uses a **dual-signal scoring engine** that blends analyzer scores (45%) with threat feed results (55%) into a final 0–100 risk score. Feed scoring is **severity-aware** — a URL flagged by 20 VirusTotal engines scores far higher than one with 3 detections, rather than treating all matches equally.
 
 | Score | Category | Meaning |
 |-------|----------|---------|
@@ -98,7 +99,11 @@ IRIS uses a **dual-signal scoring engine** that blends analyzer scores (45%) wit
 
 Special categories exist for file download threats: **Malicious File Download** and **Suspicious File Download**.
 
-Threat feed matches are weighted individually (VirusTotal 40%, Google Safe Browsing 35%, AbuseIPDB 25%) and blended with analyzer evidence. Multiple confirming feeds drive both the score and confidence higher.
+**Confidence** is tuned for SOC analyst clarity: Malicious and Safe verdicts report **100% confidence**, while Uncertain scales **30–80%** on a U-curve (higher near decision boundaries, lowest in the ambiguous middle).
+
+**Feed floor enforcement** prevents strong VirusTotal signals from being diluted into "Safe" when other feeds (GSB, AbuseIPDB) haven't indexed the campaign yet. For example, 10+ VT detections enforce a minimum composite score of 65 (Malicious).
+
+Threat feed matches are weighted individually (VirusTotal 40%, Google Safe Browsing 35%, AbuseIPDB 25%) and blended with analyzer evidence.
 
 ## Architecture
 

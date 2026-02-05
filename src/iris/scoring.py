@@ -84,6 +84,15 @@ def calculate_score(
     composite = min(100.0, max(0.0, composite))
 
     # ------------------------------------------------------------------
+    # Step 3b: High-confidence feed floor
+    # ------------------------------------------------------------------
+    # When a threat feed has strong detections (e.g. VT 10+ engines),
+    # the composite should never fall into the "Safe" zone.  New phishing
+    # campaigns are often flagged by VT well before GSB or AbuseIPDB
+    # index them, so a strong single-feed signal is sufficient evidence.
+    composite = _apply_feed_floor(composite, feed_results, config)
+
+    # ------------------------------------------------------------------
     # Step 4: 3-tier classification
     # ------------------------------------------------------------------
     thresholds = scoring_cfg.get("thresholds", {})
@@ -111,10 +120,13 @@ def _compute_feed_signal(
     feed_results: list[FeedResult],
     config: dict[str, Any],
 ) -> float:
-    """Compute a 0-100 feed signal based on which feeds matched.
+    """Compute a 0-100 feed signal with severity-aware scaling.
 
-    Each feed has a configurable weight reflecting its reliability.
-    The signal is the proportion of matched feed weight to total feed weight.
+    The signal accounts for:
+      - Which feeds matched (weighted by reliability).
+      - How many VT engines flagged the URL (severity scaling).
+      - Non-matching feeds only dilute the signal partially — absence
+        of data in GSB/AbuseIPDB should not cancel a strong VT hit.
 
     Args:
         feed_results: List of FeedResult from threat feed checks.
@@ -129,6 +141,7 @@ def _compute_feed_signal(
 
     total_feed_weight = 0.0
     matched_feed_weight = 0.0
+    vt_severity_boost = 0.0
 
     for fr in feed_results:
         w = configured_weights.get(fr.feed_name, 30.0)
@@ -136,10 +149,74 @@ def _compute_feed_signal(
         if fr.matched:
             matched_feed_weight += w
 
+            # VirusTotal severity scaling: more detections = stronger signal
+            if fr.feed_name == "VirusTotal" and fr.raw_response:
+                malicious = fr.raw_response.get("malicious", 0)
+                suspicious = fr.raw_response.get("suspicious", 0)
+                detections = malicious + suspicious
+
+                # Scale: 3-5 detections = mild boost, 10+ = strong, 20+ = maximum
+                if detections >= 20:
+                    vt_severity_boost = 50.0
+                elif detections >= 10:
+                    vt_severity_boost = 40.0
+                elif detections >= 5:
+                    vt_severity_boost = 25.0
+                elif detections >= 3:
+                    vt_severity_boost = 10.0
+
     if total_feed_weight <= 0:
         return 0.0
 
-    return (matched_feed_weight / total_feed_weight) * 100.0
+    base_signal = (matched_feed_weight / total_feed_weight) * 100.0
+
+    # Combine: base signal + VT severity boost, capped at 100
+    return min(100.0, base_signal + vt_severity_boost)
+
+
+def _apply_feed_floor(
+    composite: float,
+    feed_results: list[FeedResult],
+    config: dict[str, Any],
+) -> float:
+    """Enforce a minimum composite score when a feed has strong detections.
+
+    New phishing campaigns are typically flagged by VirusTotal long before
+    Google Safe Browsing or AbuseIPDB index them.  Without a floor, the
+    absence of data from those feeds dilutes the VT signal enough to push
+    clearly malicious URLs into the "Safe" zone.
+
+    Floors (based on VT detection count):
+      - 20+ detections → composite floor 75 (Malicious)
+      - 10+ detections → composite floor 65 (Malicious)
+      - 5+  detections → composite floor 40 (Uncertain)
+      - 3+  detections → composite floor 30 (Uncertain)
+
+    Args:
+        composite: The current composite score.
+        feed_results: List of FeedResult from threat feed checks.
+        config: The loaded configuration dictionary.
+
+    Returns:
+        The composite score, raised to the floor if applicable.
+    """
+    for fr in feed_results:
+        if fr.feed_name == "VirusTotal" and fr.matched and fr.raw_response:
+            malicious = fr.raw_response.get("malicious", 0)
+            suspicious = fr.raw_response.get("suspicious", 0)
+            detections = malicious + suspicious
+
+            if detections >= 20:
+                composite = max(composite, 75.0)
+            elif detections >= 10:
+                composite = max(composite, 65.0)
+            elif detections >= 5:
+                composite = max(composite, 40.0)
+            elif detections >= 3:
+                composite = max(composite, 30.0)
+            break
+
+    return composite
 
 
 def _calculate_confidence(
@@ -149,17 +226,16 @@ def _calculate_confidence(
     category: RiskCategory,
     thresholds: dict[str, Any],
 ) -> float:
-    """Calculate confidence as a percentage (50-99).
+    """Calculate confidence as a percentage.
 
-    Confidence is high when:
-      - The composite score is far from the classification boundaries.
-      - Individual analyzer scores agree with each other (low variance).
-      - Feed results reinforce the analyzer findings.
-
-    Confidence is low when:
-      - The composite score is near a threshold boundary.
-      - Analyzers disagree (some high, some low).
-      - Feed results contradict analyzer findings.
+    Designed for SOC analysts who need an instant read:
+      - **Malicious** → 100%.  If the scoring engine classified it as
+        malicious (VT detections, feed matches, etc.) the evidence is
+        conclusive and confidence should reflect that.
+      - **Safe** → 100%.  All signals agree there's no threat.
+      - **Uncertain** → scales between 30-80% based on how far the
+        composite is from the decision boundaries.  Low VT hits or
+        ambiguous signals produce lower confidence.
 
     Args:
         completed: List of completed AnalyzerResults.
@@ -169,50 +245,27 @@ def _calculate_confidence(
         thresholds: Threshold config dict with 'safe' and 'malicious' keys.
 
     Returns:
-        Confidence percentage rounded to 1 decimal (50.0-99.0).
+        Confidence percentage rounded to 1 decimal.
     """
+    if category == RiskCategory.MALICIOUS:
+        return 100.0
+
+    if category == RiskCategory.SAFE:
+        return 100.0
+
+    # --- UNCERTAIN zone: scale 30-80% based on evidence strength ---
     safe_max = thresholds.get("safe", 25)
     malicious_min = thresholds.get("malicious", 60)
 
-    # --- Component 1: Distance from nearest boundary (0-1 scale) ---
-    if category == RiskCategory.SAFE:
-        distance = (safe_max - composite_score) / max(safe_max, 1)
-    elif category == RiskCategory.MALICIOUS:
-        distance = (composite_score - malicious_min) / max(100 - malicious_min, 1)
-    else:  # UNCERTAIN
-        mid = (safe_max + malicious_min) / 2.0
-        span = (malicious_min - safe_max) / 2.0
-        distance = abs(composite_score - mid) / max(span, 1)
+    # How far into the uncertain zone (0.0 = near safe, 1.0 = near malicious)
+    span = max(malicious_min - safe_max, 1)
+    position = (composite_score - safe_max) / span
+    position = min(1.0, max(0.0, position))
 
-    boundary_confidence = min(1.0, max(0.0, distance))
+    # Near the boundaries = higher confidence in the *direction*;
+    # mid-zone = lowest confidence (most ambiguous)
+    # U-shaped curve: confidence is higher at edges, lower in middle
+    distance_from_mid = abs(position - 0.5) * 2.0  # 0 at center, 1 at edges
+    confidence = 30.0 + distance_from_mid * 50.0
 
-    # --- Component 2: Analyzer agreement (1 - normalized std deviation) ---
-    if len(completed) >= 2:
-        scores = [r.score for r in completed]
-        mean = sum(scores) / len(scores)
-        variance = sum((s - mean) ** 2 for s in scores) / len(scores)
-        std_dev = variance ** 0.5
-        # Normalize: std_dev of 50 (max possible disagreement) → 0 agreement
-        agreement = 1.0 - min(1.0, std_dev / 50.0)
-    else:
-        agreement = 0.5  # single analyzer → moderate agreement
-
-    # --- Component 3: Feed reinforcement ---
-    if category == RiskCategory.MALICIOUS:
-        feed_reinforcement = feed_signal / 100.0
-    elif category == RiskCategory.SAFE:
-        feed_reinforcement = 1.0 - (feed_signal / 100.0)
-    else:
-        feed_reinforcement = 0.5  # feeds are ambiguous in uncertain zone
-
-    # --- Weighted combination ---
-    raw_confidence = (
-        boundary_confidence * 0.45
-        + agreement * 0.30
-        + feed_reinforcement * 0.25
-    )
-
-    # Scale to 50-99 range — a completed scan should never show <50%.
-    scaled = 50.0 + raw_confidence * 49.0
-
-    return round(min(99.0, max(50.0, scaled)), 1)
+    return round(min(80.0, max(30.0, confidence)), 1)

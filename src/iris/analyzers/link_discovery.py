@@ -15,10 +15,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 import tldextract
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
+from playwright.sync_api import sync_playwright
 
 from iris.analyzers.base import BaseAnalyzer
-from iris.browser import launch_browser, create_context, navigate_with_bypass
+from iris.browser import create_context, launch_browser, navigate_with_bypass
 from iris.models import AnalyzerResult, AnalyzerStatus, DiscoveredLink, Finding
 
 logger = logging.getLogger(__name__)
@@ -502,7 +503,8 @@ class LinkDiscoveryAnalyzer(BaseAnalyzer):
         try:
             has_credential_form = page.evaluate("""() => {
                 const pwFields = document.querySelectorAll('input[type="password"]');
-                const credNames = ['username', 'email', 'user', 'login', 'password', 'passwd', 'identifier'];
+                const credNames = ['username', 'email', 'user',
+                    'login', 'password', 'passwd', 'identifier'];
                 const namedInputs = document.querySelectorAll('input[name]');
                 let hasCred = pwFields.length > 0;
                 for (const inp of namedInputs) {
@@ -519,7 +521,9 @@ class LinkDiscoveryAnalyzer(BaseAnalyzer):
         # Check for brand impersonation on destination
         try:
             page_text = page.evaluate(
-                "() => (document.title + ' ' + document.body.innerText).toLowerCase().substring(0, 5000)"
+                "() => (document.title + ' ' + "
+                "document.body.innerText).toLowerCase()"
+                ".substring(0, 5000)"
             )
             dest_base_domain = dest_extracted.domain.lower()
             for brand in brands:

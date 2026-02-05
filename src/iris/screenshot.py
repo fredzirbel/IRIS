@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from playwright.sync_api import Page, sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
-from iris.browser import launch_browser, create_context, navigate_with_bypass
+from iris.browser import create_context, launch_browser, navigate_with_bypass
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +288,8 @@ def _annotate_suspicious_elements(page: object) -> int:
                 const elements = document.querySelectorAll(selector);
                 elements.forEach(el => {{
                     let reason = 'SUSPICIOUS INPUT';
-                    if (el.type === 'password' || (el.name && el.name.toLowerCase().includes('pass'))) {{
+                    if (el.type === 'password' ||
+                        (el.name && el.name.toLowerCase().includes('pass'))) {{
                         reason = 'PASSWORD FIELD';
                     }} else if (el.tagName === 'FORM') {{
                         reason = 'SUSPICIOUS FORM';
@@ -309,7 +311,9 @@ def _annotate_suspicious_elements(page: object) -> int:
             const node = walker.currentNode;
             const tag = node.tagName.toLowerCase();
             // Only check interactive/visible elements and headings
-            if (['a', 'button', 'div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'li', 'label'].includes(tag)) {{
+            const interactiveTags = ['a', 'button', 'div', 'span',
+                'p', 'h1', 'h2', 'h3', 'h4', 'li', 'label'];
+            if (interactiveTags.includes(tag)) {{
                 clickableElements.push(node);
             }}
         }}
@@ -323,10 +327,26 @@ def _annotate_suspicious_elements(page: object) -> int:
                 if (text.includes(pattern)) {{
                     let reason = 'SUSPICIOUS TEXT';
                     if (pattern.includes('download')) reason = 'DOWNLOAD BUTTON';
-                    else if (pattern.includes('captcha') || pattern.includes('human')) reason = 'CAPTCHA/VERIFICATION';
-                    else if (pattern.includes('win+r') || pattern.includes('windows + r') || pattern.includes('powershell') || pattern.includes('cmd.exe') || pattern.includes('run this command') || pattern.includes('copy and paste')) reason = 'CLICKFIX ATTACK';
-                    else if (pattern.includes('allow') || pattern.includes('notification') || pattern.includes('enable')) reason = 'PERMISSION PROMPT';
-                    else if (pattern.includes('verify') || pattern.includes('confirm') || pattern.includes('update') || pattern.includes('suspended') || pattern.includes('unusual')) reason = 'SOCIAL ENGINEERING';
+                    else if (pattern.includes('captcha') ||
+                        pattern.includes('human'))
+                        reason = 'CAPTCHA/VERIFICATION';
+                    else if (pattern.includes('win+r') ||
+                        pattern.includes('windows + r') ||
+                        pattern.includes('powershell') ||
+                        pattern.includes('cmd.exe') ||
+                        pattern.includes('run this command') ||
+                        pattern.includes('copy and paste'))
+                        reason = 'CLICKFIX ATTACK';
+                    else if (pattern.includes('allow') ||
+                        pattern.includes('notification') ||
+                        pattern.includes('enable'))
+                        reason = 'PERMISSION PROMPT';
+                    else if (pattern.includes('verify') ||
+                        pattern.includes('confirm') ||
+                        pattern.includes('update') ||
+                        pattern.includes('suspended') ||
+                        pattern.includes('unusual'))
+                        reason = 'SOCIAL ENGINEERING';
                     else if (pattern.includes('click')) reason = 'SUSPICIOUS BUTTON';
                     annotateElement(el, reason);
                     break;
@@ -572,7 +592,8 @@ def capture_multi_screenshots(
                             for (const el of elements) {{
                                 const rect = el.getBoundingClientRect();
                                 if (rect.width === 0 || rect.height === 0) continue;
-                                if (el.offsetParent === null && el.style.position !== 'fixed') continue;
+                                if (el.offsetParent === null &&
+                                    el.style.position !== 'fixed') continue;
                                 if (matchesCTA(el)) {{
                                     el.click();
                                     return true;

@@ -106,4 +106,5 @@ class ScanReport:
     resolved_ip: str = ""
     discovered_links: list[DiscoveredLink] = field(default_factory=list)
     file_download: FileDownloadInfo | None = None
-    multi_screenshots: dict = field(default_factory=dict)  # {initial, initial_url, cta, cta_url, cta_text}
+    # Keys: initial, initial_url, cta, cta_url, cta_text
+    multi_screenshots: dict = field(default_factory=dict)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -220,9 +219,10 @@ class PageContentAnalyzer(BaseAnalyzer):
             The page's outer HTML, or an empty string on failure.
         """
         from playwright.sync_api import sync_playwright
+
         from iris.browser import (
-            launch_browser,
             create_context,
+            launch_browser,
             navigate_with_bypass,
         )
 

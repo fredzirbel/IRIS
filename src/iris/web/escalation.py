@@ -17,7 +17,6 @@ from typing import Any
 
 from iris.web.defang import defang as defang_url
 
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -238,29 +237,6 @@ def generate_escalation(
     initial_vt_link = _vt_url_link(initial_url_raw)
     final_vt_link = _vt_url_link(final_url_raw)
 
-    # ----- Domain for KQL queries --------------------------------------
-    domain: str = scan_data.get("domain", "")
-
-    # Extract sender domain if sender address is available
-    sender_domain = ""
-    if ctx.get("sender") and "@" in ctx["sender"]:
-        sender_domain = ctx["sender"].rsplit("@", 1)[-1]
-
-    kql_queries = generate_kql_queries(
-        domain=domain,
-        url=scanned_url,
-        sender_domain=sender_domain,
-    )
-
-    # Build KQL references for the snippet
-    url_clicks_query = ""
-    similar_emails_query = ""
-    for q in kql_queries:
-        if q["name"] == "URL Clicks":
-            url_clicks_query = q["query"]
-        elif q["name"] == "Similar Emails":
-            similar_emails_query = q["query"]
-
     # ----- File download subsection ------------------------------------
     file_download_section = ""
     file_dl = scan_data.get("file_download")
@@ -293,7 +269,8 @@ def generate_escalation(
 #### Medium Priority
 ***
 #### Observations
-{alert_name} has alerted on a malicious URL click involving the user {user_name} with the following details:
+{alert_name} has alerted on a malicious URL click involving \
+the user {user_name} with the following details:
 * UPN: {upn}
   * [Sign-in logs]
   * [Audit logs]
@@ -322,7 +299,10 @@ def generate_escalation(
 * Requested an `email deletion`.
 
 ### Risks
-Phishing involves malicious actors sending deceptive emails containing suspicious links or attachments, often accompanied by social engineering tactics, with the intent to harvest credentials or execute malicious code on the victim's machine.
+Phishing involves malicious actors sending deceptive emails containing \
+suspicious links or attachments, often accompanied by social engineering \
+tactics, with the intent to harvest credentials or execute malicious \
+code on the victim's machine.
 * [MITRE | Phishing](https://attack.mitre.org/techniques/T1566/)
 
 ### Recommendations
@@ -330,7 +310,9 @@ Phishing involves malicious actors sending deceptive emails containing suspiciou
   * Ensure the removal of this email and any related emails.
   * Block the sender address and IP if they are not required for business operations.
   * Monitor the user's account for anomalous follow-on activity.
-* If this activity is expected, orchestration can be implemented to suppress future alerts for this behavior, or this alert may be closed with a comment.
+* If this activity is expected, orchestration can be implemented to \
+suppress future alerts for this behavior, or this alert may be closed \
+with a comment.
 
 `If further action or clarification is needed, please escalate this back to Critical Start.`"""
 

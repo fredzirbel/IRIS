@@ -16,7 +16,6 @@ from iris.feeds.google_safebrowsing import GoogleSafeBrowsingFeed
 from iris.feeds.virustotal import VirusTotalFeed
 from iris.models import AnalyzerResult, AnalyzerStatus, FeedResult, Finding
 
-
 _FEED_DISPLAY_ORDER: dict[str, int] = {
     "VirusTotal": 1,
     "AbuseIPDB": 2,

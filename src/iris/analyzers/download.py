@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -120,14 +119,11 @@ class DownloadAnalyzer(BaseAnalyzer):
         content_type = ""
         content_disp = ""
         is_attachment = False
-        head_ok = False
-
         try:
             head_resp = requests.head(
                 url, headers=headers, timeout=timeout,
                 verify=verify_ssl, allow_redirects=True,
             )
-            head_ok = True
             content_type = head_resp.headers.get("Content-Type", "").lower().split(";")[0].strip()
             content_disp = head_resp.headers.get("Content-Disposition", "")
             is_attachment = "attachment" in content_disp.lower()
@@ -234,7 +230,12 @@ class DownloadAnalyzer(BaseAnalyzer):
         # "suggested_filename" is just the opaque URL path segment (e.g.
         # "F4lBD64y"), which is NOT the real filename — leave it blank so the
         # template shows "Unknown (behind Cloudflare)" instead.
-        if browser_dl_info and browser_dl_info.get("path") and browser_dl_info.get("suggested_filename"):
+        has_suggested = (
+            browser_dl_info
+            and browser_dl_info.get("path")
+            and browser_dl_info.get("suggested_filename")
+        )
+        if has_suggested:
             filename = browser_dl_info["suggested_filename"]
         elif cf_blocked:
             # Don't use the opaque path segment as a filename.
@@ -378,7 +379,7 @@ class DownloadAnalyzer(BaseAnalyzer):
             ``content_type``, and optionally ``cloudflare_phishing_block``;
             or ``None`` if nothing useful was detected.
         """
-        from iris.browser import USER_AGENT, _INIT_SCRIPT
+        from iris.browser import _INIT_SCRIPT, USER_AGENT
 
         context = None
         try:
@@ -420,7 +421,7 @@ class DownloadAnalyzer(BaseAnalyzer):
             # can inspect the page ourselves without the bypass consuming time
             # on a Turnstile that will never solve.
             try:
-                resp = page.goto(
+                page.goto(
                     url, wait_until="domcontentloaded", timeout=15000,
                 )
             except Exception as exc:

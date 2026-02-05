@@ -94,7 +94,7 @@ def generate_osint_links(
                     .rstrip("=")
                 )
                 links.append({
-                    "name": f"VirusTotal (Redirect URL)",
+                    "name": "VirusTotal (Redirect URL)",
                     "url": f"https://www.virustotal.com/gui/url/{vt_hop_id}",
                     "icon_class": "vt",
                     "description": f"Redirect: {hop_domain}",
@@ -104,7 +104,7 @@ def generate_osint_links(
             if hop_domain.lower() not in seen_domains and hop_domain != ".":
                 seen_domains.add(hop_domain.lower())
                 links.append({
-                    "name": f"VirusTotal (Redirect Domain)",
+                    "name": "VirusTotal (Redirect Domain)",
                     "url": f"https://www.virustotal.com/gui/domain/{hop_domain}",
                     "icon_class": "vt",
                     "description": f"Redirect domain: {hop_domain}",

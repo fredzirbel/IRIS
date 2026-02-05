@@ -7,8 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from iris.models import AnalyzerResult, AnalyzerStatus, FeedResult, RiskCategory, ScanReport
-
+from iris.models import AnalyzerStatus, FeedResult, RiskCategory, ScanReport
 
 console = Console(force_terminal=True)
 
@@ -99,7 +98,9 @@ def _render_breakdown_table(report: ScanReport, verbose: bool) -> None:
                 findings_str = f"[yellow]{result.error_message}[/yellow]"
             elif result.findings:
                 findings_str = "\n".join(
-                    f"[{_severity_color(f.severity)}]* {f.description}[/{_severity_color(f.severity)}]"
+                    f"[{_severity_color(f.severity)}]"
+                    f"* {f.description}"
+                    f"[/{_severity_color(f.severity)}]"
                     for f in result.findings
                 )
             else:

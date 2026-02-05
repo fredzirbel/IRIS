@@ -10,20 +10,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from playwright.sync_api import sync_playwright, Browser, Playwright
+from playwright.sync_api import Browser, Playwright, sync_playwright
 
 from iris.analyzers import ALL_ANALYZERS
 from iris.browser import launch_browser
 from iris.models import (
     AnalyzerResult,
     AnalyzerStatus,
-    FeedResult,
-    FileDownloadInfo,
     RiskCategory,
     ScanReport,
 )
 from iris.scoring import calculate_score
-from iris.screenshot import capture_screenshot, capture_multi_screenshots
+from iris.screenshot import capture_multi_screenshots, capture_screenshot
 
 logger = logging.getLogger(__name__)
 

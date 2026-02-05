@@ -74,7 +74,6 @@ def calculate_score(
     feed_blend = blend.get("feed_weight", 0.55)
 
     # If no feeds are configured at all, give all weight to analyzers.
-    configured_feed_weights = scoring_cfg.get("feed_weights", _DEFAULT_FEED_WEIGHTS)
     has_any_feed_configured = len(feed_results) > 0
     if not has_any_feed_configured:
         analyzer_blend = 1.0

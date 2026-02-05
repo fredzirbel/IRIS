@@ -17,16 +17,14 @@ Key features:
 from __future__ import annotations
 
 import logging
-import re
-from typing import Any
-from urllib.parse import urlparse
 
 from playwright.sync_api import (
     Browser,
     BrowserContext,
     Page,
-    sync_playwright,
     Playwright,
+)
+from playwright.sync_api import (
     TimeoutError as PlaywrightTimeout,
 )
 

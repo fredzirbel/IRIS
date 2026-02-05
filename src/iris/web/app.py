@@ -140,13 +140,6 @@ def _serialize_scans() -> list[dict]:
     Returns:
         List of scan entry dicts with all dataclass fields flattened.
     """
-    from iris.models import (
-        AnalyzerResult,
-        DiscoveredLink,
-        FeedResult,
-        FileDownloadInfo,
-        ScanReport,
-    )
 
     entries = []
     for entry in _scans.values():
@@ -198,7 +191,6 @@ def _deserialize_scans(entries: list[dict]) -> dict[str, dict[str, Any]]:
         try:
             rd = entry["report"]
 
-            findings_lists = []
             analyzer_results = []
             for ar in rd.get("analyzer_results", []):
                 findings = [Finding(**f) for f in ar.get("findings", [])]
@@ -886,8 +878,6 @@ async def api_scan_sync(request: Request) -> JSONResponse:
     extracted = tldextract.extract(url)
     domain = f"{extracted.domain}.{extracted.suffix}"
     ip = _resolve_ip(url)
-    osint_links = generate_osint_links(url, domain, ip)
-
     loop = asyncio.get_event_loop()
 
     def run_scan():

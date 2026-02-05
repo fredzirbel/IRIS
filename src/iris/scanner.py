@@ -23,7 +23,7 @@ from iris.models import (
     ScanReport,
 )
 from iris.scoring import calculate_score
-from iris.screenshot import capture_screenshot
+from iris.screenshot import capture_screenshot, capture_multi_screenshots
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +290,23 @@ def scan_url(
             ).get("safe", 25) + 1
             overall_score = max(overall_score, float(safe_max))
 
+    # Capture multi-screenshots (initial + CTA click)
+    multi_screenshots: dict[str, str | None] = {
+        "initial": None,
+        "initial_url": None,
+        "cta": None,
+        "cta_url": None,
+        "cta_text": None,
+    }
+    if screenshot_dir and not passive_only:
+        try:
+            multi_screenshots = capture_multi_screenshots(
+                url, Path(screenshot_dir), config, browser=shared_browser,
+            )
+            _emit(on_event, "multi_screenshots", multi_screenshots)
+        except Exception as exc:
+            logger.error("Multi-screenshot capture failed: %s", exc)
+
     recommendation = _build_recommendation(risk_category)
 
     # Emit final score event
@@ -313,6 +330,7 @@ def scan_url(
         screenshot_path=screenshot_path,
         discovered_links=scan_meta["discovered_links"],
         file_download=scan_meta["file_download"],
+        multi_screenshots=multi_screenshots,
     )
 
 

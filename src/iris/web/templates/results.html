@@ -83,6 +83,74 @@
     </details>
 </section>
 
+<!-- Multi-Screenshots (hidden until data) -->
+<section class="card" id="section-multi-screenshots" style="display:none;">
+    <details open>
+        <summary class="section-toggle">Screenshots (Initial &amp; CTA Click)</summary>
+        <div class="section-body" id="multi-screenshots-body"></div>
+    </details>
+</section>
+
+<!-- SOC Workflow (hidden until scan complete) -->
+<section class="card escalation-section" id="section-soc-workflow" style="display:none;">
+    <details open>
+        <summary class="section-toggle">SOC Workflow</summary>
+        <div class="section-body">
+            <h4 style="margin:0 0 0.5rem;font-size:0.92rem;">Alert Context <span class="muted" style="font-weight:400;font-size:0.78rem;">(optional)</span></h4>
+            <div class="alert-context-panel">
+                <div class="alert-context-grid">
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">UPN / Email</label>
+                        <input type="text" class="alert-context-input" id="ctx-upn" placeholder="user@contoso.com">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Display Name</label>
+                        <input type="text" class="alert-context-input" id="ctx-name" placeholder="John Doe">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Subject</label>
+                        <input type="text" class="alert-context-input" id="ctx-subject" placeholder="Email subject line">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Network Message ID</label>
+                        <input type="text" class="alert-context-input" id="ctx-msgid" placeholder="Message ID from alert">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Sender</label>
+                        <input type="text" class="alert-context-input" id="ctx-sender" placeholder="sender@malicious.com">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Sender IP</label>
+                        <input type="text" class="alert-context-input" id="ctx-sender-ip" placeholder="1.2.3.4">
+                    </div>
+                    <div class="alert-context-field full-width">
+                        <label class="alert-context-label">Alert Name</label>
+                        <input type="text" class="alert-context-input" id="ctx-alert-name" placeholder="e.g. Phishing URL Click">
+                    </div>
+                </div>
+                <div class="alert-context-actions">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-generate-escalation" onclick="generateEscalation()">Generate Escalation</button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-enrich-ip" onclick="enrichSenderIp()" style="display:none;">Enrich Sender IP</button>
+                </div>
+            </div>
+            <div id="sender-ip-results" class="sender-ip-results" style="display:none;"></div>
+            <div id="kql-section" style="display:none;margin-top:1.25rem;">
+                <h4 style="margin:0 0 0.5rem;font-size:0.92rem;">KQL Queries</h4>
+                <div class="kql-grid" id="kql-grid"></div>
+            </div>
+            <div id="escalation-section" style="display:none;margin-top:1.25rem;">
+                <h4 style="margin:0 0 0.5rem;font-size:0.92rem;">Escalation</h4>
+                <div class="escalation-output">
+                    <pre id="escalation-output-pre"></pre>
+                </div>
+                <div class="escalation-actions">
+                    <button type="button" class="btn btn-primary btn-sm" onclick="copyEscalation()">Copy Escalation</button>
+                </div>
+            </div>
+        </div>
+    </details>
+</section>
+
 <!-- Analyzer Breakdown -->
 <section class="card" id="section-analyzers">
     <details open>
@@ -425,8 +493,8 @@
 
         var banner = document.getElementById("score-banner");
         banner.className = "score-banner score-" + catClass;
-        document.getElementById("score-value").textContent = d.confidence.toFixed(0) + "%";
-        document.getElementById("score-label").textContent = d.risk_category;
+        document.getElementById("score-value").textContent = d.risk_category;
+        document.getElementById("score-label").textContent = d.confidence.toFixed(0) + "% confidence";
 
         var rec = document.getElementById("recommendation");
         rec.style.display = "";
@@ -438,6 +506,30 @@
         _reportData.recommendation = d.recommendation;
     });
 
+    /* ---- multi_screenshots ---- */
+    es.addEventListener("multi_screenshots", function (e) {
+        var d = JSON.parse(e.data);
+        if (!d.cta) return;  /* Only show when a CTA button was actually clicked */
+        document.getElementById("section-multi-screenshots").style.display = "";
+        var html = '<div class="multi-screenshot-grid">';
+        if (d.initial) {
+            html += '<div class="multi-screenshot-item">' +
+                '<div class="multi-screenshot-label">Initial Page</div>';
+            if (d.initial_url) html += '<div class="multi-screenshot-url">' + esc(defang(d.initial_url)) + '</div>';
+            html += '<img src="/screenshots/' + esc(d.initial) + '" alt="Initial page" class="screenshot-img">' +
+                '</div>';
+        }
+        if (d.cta) {
+            html += '<div class="multi-screenshot-item">' +
+                '<div class="multi-screenshot-label label-cta">After Click: ' + esc(d.cta_text || "CTA") + '</div>';
+            if (d.cta_url) html += '<div class="multi-screenshot-url">' + esc(defang(d.cta_url)) + '</div>';
+            html += '<img src="/screenshots/' + esc(d.cta) + '" alt="After CTA click" class="screenshot-img">' +
+                '</div>';
+        }
+        html += '</div>';
+        document.getElementById("multi-screenshots-body").innerHTML = html;
+    });
+
     /* ---- complete ---- */
     es.addEventListener("complete", function () {
         es.close();
@@ -447,6 +539,9 @@
         /* Show Copy Report button */
         var copyBtn = document.getElementById("copy-report-btn");
         if (copyBtn) copyBtn.style.display = "";
+        /* Show SOC Workflow section */
+        var socSection = document.getElementById("section-soc-workflow");
+        if (socSection) socSection.style.display = "";
     });
 
     /* ---- error ---- */
@@ -520,6 +615,113 @@
         });
     };
 
+    /* ---- Show Enrich IP button when sender IP is entered ---- */
+    var senderIpInput = document.getElementById("ctx-sender-ip");
+    if (senderIpInput) {
+        senderIpInput.addEventListener("input", function () {
+            var btn = document.getElementById("btn-enrich-ip");
+            btn.style.display = this.value.trim() ? "" : "none";
+        });
+    }
+
+    /* ---- Generate Escalation (streaming mode) ---- */
+    window.generateEscalation = function () {
+        var btn = document.getElementById("btn-generate-escalation");
+        btn.disabled = true;
+        btn.textContent = "Generating\u2026";
+
+        var alertCtx = {
+            upn: (document.getElementById("ctx-upn").value || "").trim(),
+            name: (document.getElementById("ctx-name").value || "").trim(),
+            subject: (document.getElementById("ctx-subject").value || "").trim(),
+            network_message_id: (document.getElementById("ctx-msgid").value || "").trim(),
+            sender: (document.getElementById("ctx-sender").value || "").trim(),
+            sender_ip: (document.getElementById("ctx-sender-ip").value || "").trim(),
+            alert_name: (document.getElementById("ctx-alert-name").value || "").trim(),
+        };
+        var hasContext = false;
+        Object.keys(alertCtx).forEach(function (k) {
+            if (!alertCtx[k]) delete alertCtx[k];
+            else hasContext = true;
+        });
+
+        fetch("/api/escalation/" + scanId, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({alert_context: hasContext ? alertCtx : null}),
+        })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+            if (data.error) { alert("Error: " + data.error); return; }
+            document.getElementById("escalation-section").style.display = "";
+            document.getElementById("escalation-output-pre").textContent = data.escalation_md;
+            if (data.kql_queries && data.kql_queries.length) {
+                document.getElementById("kql-section").style.display = "";
+                var grid = document.getElementById("kql-grid");
+                grid.innerHTML = "";
+                data.kql_queries.forEach(function (q) {
+                    var card = document.createElement("div");
+                    card.className = "kql-card";
+                    card.innerHTML =
+                        '<div class="kql-card-header"><span class="kql-card-name">' + esc(q.name) + '</span>' +
+                        '<button class="btn btn-secondary btn-sm copy-chip" data-copy="' + esc(q.query).replace(/"/g, '&quot;') + '" title="Copy KQL">Copy</button></div>' +
+                        '<div class="kql-card-desc">' + esc(q.description) + '</div>' +
+                        '<div class="kql-code">' + esc(q.query) + '</div>';
+                    grid.appendChild(card);
+                });
+            }
+        })
+        .catch(function (err) { alert("Request failed: " + err.message); })
+        .finally(function () { btn.disabled = false; btn.textContent = "Generate Escalation"; });
+    };
+
+    window.copyEscalation = function () {
+        var text = document.getElementById("escalation-output-pre").textContent;
+        navigator.clipboard.writeText(text).then(function () {
+            var btns = document.querySelectorAll(".escalation-actions .btn-primary");
+            if (btns.length) { btns[0].textContent = "Copied!"; setTimeout(function () { btns[0].textContent = "Copy Escalation"; }, 2000); }
+        });
+    };
+
+    window.enrichSenderIp = function () {
+        var ip = (document.getElementById("ctx-sender-ip").value || "").trim();
+        if (!ip) return;
+        var btn = document.getElementById("btn-enrich-ip");
+        btn.disabled = true; btn.textContent = "Enriching\u2026";
+        fetch("/api/enrich-ip", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ip: ip}) })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+            if (data.error) { alert("Error: " + data.error); return; }
+            var container = document.getElementById("sender-ip-results");
+            container.style.display = "";
+            var html = '<h4 style="margin:0 0 0.5rem;font-size:0.92rem;">Sender IP: ' + esc(data.ip) + '</h4>';
+            if (data.vt) {
+                var vt = data.vt;
+                var vtBadge = vt.malicious > 0
+                    ? '<span class="badge badge-malicious">' + vt.malicious + '/' + vt.total + ' malicious</span>'
+                    : '<span class="badge badge-status-completed">' + vt.malicious + '/' + vt.total + ' engines</span>';
+                html += '<div class="sender-ip-row"><span class="sender-ip-label">VirusTotal</span><span class="sender-ip-value">' + vtBadge;
+                if (vt.as_owner) html += ' &middot; ' + esc(vt.as_owner);
+                if (vt.country) html += ' (' + esc(vt.country) + ')';
+                html += ' <a href="' + esc(data.vt_link) + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary" style="margin-left:0.5rem;">View</a></span></div>';
+            }
+            if (data.abuseipdb) {
+                var ab = data.abuseipdb;
+                var abBadge = ab.abuse_confidence > 25
+                    ? '<span class="badge badge-malicious">' + ab.abuse_confidence + '% abuse confidence</span>'
+                    : '<span class="badge badge-status-completed">' + ab.abuse_confidence + '% abuse confidence</span>';
+                html += '<div class="sender-ip-row"><span class="sender-ip-label">AbuseIPDB</span><span class="sender-ip-value">' + abBadge + ' &middot; ' + ab.total_reports + ' reports';
+                if (ab.isp) html += ' &middot; ' + esc(ab.isp);
+                if (ab.is_tor) html += ' <span class="flag flag-critical">TOR</span>';
+                html += ' <a href="' + esc(data.abuseipdb_link) + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary" style="margin-left:0.5rem;">View</a></span></div>';
+            }
+            if (!data.vt && !data.abuseipdb) html += '<p class="muted">No API keys configured for IP enrichment.</p>';
+            container.innerHTML = html;
+        })
+        .catch(function (err) { alert("IP enrichment failed: " + err.message); })
+        .finally(function () { btn.disabled = false; btn.textContent = "Enrich Sender IP"; });
+    };
+
     /* ---- Delegated click handler for .copy-chip buttons ---- */
     document.addEventListener("click", function (e) {
         var btn = e.target.closest(".copy-chip");
@@ -542,8 +744,8 @@
 
 <!-- Score Banner -->
 <section class="score-banner score-{{ cat }}">
-    <div class="score-value">{{ "%.0f" | format(r.confidence) }}%</div>
-    <div class="score-label">{{ r.risk_category.value }}</div>
+    <div class="score-value">{{ r.risk_category.value }}</div>
+    <div class="score-label">{{ "%.0f" | format(r.confidence) }}% confidence</div>
     <div class="score-url">{{ r.url|defang }}</div>
 </section>
 
@@ -901,6 +1103,104 @@
 </section>
 {% endif %}
 
+<!-- Multi-Screenshots — only shown when a CTA button was actually clicked -->
+{% if multi_screenshots and multi_screenshots.get('cta') %}
+<section class="card">
+    <details open>
+        <summary class="section-toggle">Screenshots (Initial &amp; CTA Click)</summary>
+        <div class="section-body">
+            <div class="multi-screenshot-grid">
+                {% if multi_screenshots.get('initial') %}
+                <div class="multi-screenshot-item">
+                    <div class="multi-screenshot-label">Initial Page</div>
+                    {% if multi_screenshots.get('initial_url') %}
+                    <div class="multi-screenshot-url">{{ multi_screenshots.initial_url|defang }}</div>
+                    {% endif %}
+                    <img src="/screenshots/{{ multi_screenshots.initial }}" alt="Initial page" class="screenshot-img">
+                </div>
+                {% endif %}
+                <div class="multi-screenshot-item">
+                    <div class="multi-screenshot-label label-cta">After Click: {{ multi_screenshots.get('cta_text', 'CTA') }}</div>
+                    {% if multi_screenshots.get('cta_url') %}
+                    <div class="multi-screenshot-url">{{ multi_screenshots.cta_url|defang }}</div>
+                    {% endif %}
+                    <img src="/screenshots/{{ multi_screenshots.cta }}" alt="After CTA click" class="screenshot-img">
+                </div>
+            </div>
+        </div>
+    </details>
+</section>
+{% endif %}
+
+<!-- SOC Workflow: Alert Context + Escalation + KQL -->
+<section class="card escalation-section">
+    <details open>
+        <summary class="section-toggle">SOC Workflow</summary>
+        <div class="section-body">
+
+            <!-- Email Metadata Input Panel -->
+            <h4 style="margin:0 0 0.5rem;font-size:0.92rem;">Alert Context <span class="muted" style="font-weight:400;font-size:0.78rem;">(optional — fill in for a complete escalation)</span></h4>
+            <div class="alert-context-panel">
+                <div class="alert-context-grid">
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">UPN / Email</label>
+                        <input type="text" class="alert-context-input" id="ctx-upn" placeholder="user@contoso.com">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Display Name</label>
+                        <input type="text" class="alert-context-input" id="ctx-name" placeholder="John Doe">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Subject</label>
+                        <input type="text" class="alert-context-input" id="ctx-subject" placeholder="Email subject line">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Network Message ID</label>
+                        <input type="text" class="alert-context-input" id="ctx-msgid" placeholder="Message ID from alert">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Sender</label>
+                        <input type="text" class="alert-context-input" id="ctx-sender" placeholder="sender@malicious.com">
+                    </div>
+                    <div class="alert-context-field">
+                        <label class="alert-context-label">Sender IP</label>
+                        <input type="text" class="alert-context-input" id="ctx-sender-ip" placeholder="1.2.3.4">
+                    </div>
+                    <div class="alert-context-field full-width">
+                        <label class="alert-context-label">Alert Name</label>
+                        <input type="text" class="alert-context-input" id="ctx-alert-name" placeholder="e.g. Phishing URL Click">
+                    </div>
+                </div>
+                <div class="alert-context-actions">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-generate-escalation" onclick="generateEscalation()">Generate Escalation</button>
+                    <button type="button" class="btn btn-secondary btn-sm" id="btn-enrich-ip" onclick="enrichSenderIp()" style="display:none;">Enrich Sender IP</button>
+                </div>
+            </div>
+
+            <!-- Sender IP Enrichment Results (hidden until enriched) -->
+            <div id="sender-ip-results" class="sender-ip-results" style="display:none;"></div>
+
+            <!-- KQL Queries (populated after generate) -->
+            <div id="kql-section" style="display:none;margin-top:1.25rem;">
+                <h4 style="margin:0 0 0.5rem;font-size:0.92rem;">KQL Queries</h4>
+                <div class="kql-grid" id="kql-grid"></div>
+            </div>
+
+            <!-- Escalation Output (populated after generate) -->
+            <div id="escalation-section" style="display:none;margin-top:1.25rem;">
+                <h4 style="margin:0 0 0.5rem;font-size:0.92rem;">Escalation</h4>
+                <div class="escalation-output">
+                    <pre id="escalation-output-pre"></pre>
+                </div>
+                <div class="escalation-actions">
+                    <button type="button" class="btn btn-primary btn-sm" onclick="copyEscalation()">Copy Escalation</button>
+                </div>
+            </div>
+
+        </div>
+    </details>
+</section>
+
 <!-- Analyzer Breakdown -->
 <section class="card">
     <details open>
@@ -1079,6 +1379,175 @@
             setTimeout(function () { btn.textContent = "\uD83D\uDCCB"; }, 1200);
         });
     });
+
+    /* ---- Show Enrich IP button when sender IP is entered ---- */
+    var senderIpInput = document.getElementById("ctx-sender-ip");
+    if (senderIpInput) {
+        senderIpInput.addEventListener("input", function () {
+            var btn = document.getElementById("btn-enrich-ip");
+            btn.style.display = this.value.trim() ? "" : "none";
+        });
+    }
+
+    /* ---- Generate Escalation ---- */
+    window.generateEscalation = function () {
+        var scanId = "{{ scan_id }}";
+        var btn = document.getElementById("btn-generate-escalation");
+        btn.disabled = true;
+        btn.textContent = "Generating\u2026";
+
+        var alertCtx = {
+            upn: (document.getElementById("ctx-upn").value || "").trim(),
+            name: (document.getElementById("ctx-name").value || "").trim(),
+            subject: (document.getElementById("ctx-subject").value || "").trim(),
+            network_message_id: (document.getElementById("ctx-msgid").value || "").trim(),
+            sender: (document.getElementById("ctx-sender").value || "").trim(),
+            sender_ip: (document.getElementById("ctx-sender-ip").value || "").trim(),
+            alert_name: (document.getElementById("ctx-alert-name").value || "").trim(),
+        };
+
+        /* Only send non-empty fields */
+        var hasContext = false;
+        Object.keys(alertCtx).forEach(function (k) {
+            if (!alertCtx[k]) delete alertCtx[k];
+            else hasContext = true;
+        });
+
+        fetch("/api/escalation/" + scanId, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({alert_context: hasContext ? alertCtx : null}),
+        })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+            if (data.error) {
+                alert("Error: " + data.error);
+                return;
+            }
+
+            /* Render escalation markdown */
+            var escSection = document.getElementById("escalation-section");
+            escSection.style.display = "";
+            document.getElementById("escalation-output-pre").textContent = data.escalation_md;
+
+            /* Render KQL queries */
+            if (data.kql_queries && data.kql_queries.length) {
+                var kqlSection = document.getElementById("kql-section");
+                kqlSection.style.display = "";
+                var grid = document.getElementById("kql-grid");
+                grid.innerHTML = "";
+
+                data.kql_queries.forEach(function (q) {
+                    var card = document.createElement("div");
+                    card.className = "kql-card";
+                    card.innerHTML =
+                        '<div class="kql-card-header">' +
+                        '  <span class="kql-card-name">' + esc(q.name) + '</span>' +
+                        '  <button class="btn btn-secondary btn-sm copy-chip" data-copy="' + esc(q.query).replace(/"/g, '&quot;') + '" title="Copy KQL">Copy</button>' +
+                        '</div>' +
+                        '<div class="kql-card-desc">' + esc(q.description) + '</div>' +
+                        '<div class="kql-code">' + esc(q.query) + '</div>';
+                    grid.appendChild(card);
+                });
+            }
+        })
+        .catch(function (err) {
+            alert("Request failed: " + err.message);
+        })
+        .finally(function () {
+            btn.disabled = false;
+            btn.textContent = "Generate Escalation";
+        });
+    };
+
+    function esc(s) {
+        var el = document.createElement("span");
+        el.textContent = s || "";
+        return el.innerHTML;
+    }
+
+    /* ---- Copy Escalation ---- */
+    window.copyEscalation = function () {
+        var text = document.getElementById("escalation-output-pre").textContent;
+        navigator.clipboard.writeText(text).then(function () {
+            var btns = document.querySelectorAll(".escalation-actions .btn-primary");
+            if (btns.length) {
+                btns[0].textContent = "Copied!";
+                setTimeout(function () { btns[0].textContent = "Copy Escalation"; }, 2000);
+            }
+        });
+    };
+
+    /* ---- Sender IP Enrichment ---- */
+    window.enrichSenderIp = function () {
+        var ip = (document.getElementById("ctx-sender-ip").value || "").trim();
+        if (!ip) return;
+
+        var btn = document.getElementById("btn-enrich-ip");
+        btn.disabled = true;
+        btn.textContent = "Enriching\u2026";
+
+        fetch("/api/enrich-ip", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({ip: ip}),
+        })
+        .then(function (resp) { return resp.json(); })
+        .then(function (data) {
+            if (data.error) {
+                alert("Error: " + data.error);
+                return;
+            }
+
+            var container = document.getElementById("sender-ip-results");
+            container.style.display = "";
+            var html = '<h4 style="margin:0 0 0.5rem;font-size:0.92rem;">Sender IP: ' + esc(data.ip) + '</h4>';
+
+            /* VirusTotal results */
+            if (data.vt) {
+                var vt = data.vt;
+                var vtBadge = vt.malicious > 0
+                    ? '<span class="badge badge-malicious">' + vt.malicious + '/' + vt.total + ' malicious</span>'
+                    : '<span class="badge badge-status-completed">' + vt.malicious + '/' + vt.total + ' engines</span>';
+                html += '<div class="sender-ip-row">' +
+                    '<span class="sender-ip-label">VirusTotal</span>' +
+                    '<span class="sender-ip-value">' + vtBadge;
+                if (vt.as_owner) html += ' &middot; ' + esc(vt.as_owner);
+                if (vt.country) html += ' (' + esc(vt.country) + ')';
+                html += ' <a href="' + esc(data.vt_link) + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary" style="margin-left:0.5rem;">View</a>';
+                html += '</span></div>';
+            }
+
+            /* AbuseIPDB results */
+            if (data.abuseipdb) {
+                var ab = data.abuseipdb;
+                var abBadge = ab.abuse_confidence > 25
+                    ? '<span class="badge badge-malicious">' + ab.abuse_confidence + '% abuse confidence</span>'
+                    : '<span class="badge badge-status-completed">' + ab.abuse_confidence + '% abuse confidence</span>';
+                html += '<div class="sender-ip-row">' +
+                    '<span class="sender-ip-label">AbuseIPDB</span>' +
+                    '<span class="sender-ip-value">' + abBadge +
+                    ' &middot; ' + ab.total_reports + ' reports';
+                if (ab.isp) html += ' &middot; ' + esc(ab.isp);
+                if (ab.is_tor) html += ' <span class="flag flag-critical">TOR</span>';
+                html += ' <a href="' + esc(data.abuseipdb_link) + '" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary" style="margin-left:0.5rem;">View</a>';
+                html += '</span></div>';
+            }
+
+            if (!data.vt && !data.abuseipdb) {
+                html += '<p class="muted">No API keys configured for IP enrichment.</p>';
+            }
+
+            container.innerHTML = html;
+        })
+        .catch(function (err) {
+            alert("IP enrichment failed: " + err.message);
+        })
+        .finally(function () {
+            btn.disabled = false;
+            btn.textContent = "Enrich Sender IP";
+        });
+    };
 })();
 </script>
 {% endif %}

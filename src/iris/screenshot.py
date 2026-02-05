@@ -155,11 +155,11 @@ def _inject_url_banner(page: Page, final_url: str, original_url: str) -> None:
     final_escaped = final_url.replace("\\", "\\\\").replace("'", "\\'")
     original_escaped = original_url.replace("\\", "\\\\").replace("'", "\\'")
 
-    # Treat http→https upgrade (same host+path) as a non-redirect
-    final_norm = final_url.rstrip("/")
-    original_norm = original_url.rstrip("/")
-    redirected = final_norm != original_norm
-    if redirected and original_norm.replace("http://", "https://", 1) == final_norm:
+    # Treat trivial redirects (http→https upgrade, bare↔www) as non-redirects
+    from iris.analyzers.http_response import _is_trivial_redirect
+
+    redirected = final_url.rstrip("/") != original_url.rstrip("/")
+    if redirected and _is_trivial_redirect(original_url, final_url):
         redirected = False
 
     redirect_line = ""
@@ -338,3 +338,317 @@ def _annotate_suspicious_elements(page: object) -> int:
     }}""")
 
     return count or 0
+
+
+# ---------------------------------------------------------------------------
+# CTA button detection patterns
+# ---------------------------------------------------------------------------
+
+# Text patterns (case-insensitive) that identify call-to-action buttons
+_CTA_TEXT_PATTERNS = [
+    "download",
+    "click here",
+    "continue",
+    "open",
+    "view",
+    "get started",
+    "start",
+    "confirm",
+    "verify",
+    "allow",
+    "accept",
+    "enable",
+    "submit",
+    "go",
+    "proceed",
+    "view pdf",
+    "view document",
+    "your pdf is ready",
+    "click to download",
+]
+
+# CSS selectors that identify clickable CTA-like elements
+_CTA_SELECTORS = [
+    "button",
+    "a.btn",
+    "a.button",
+    '[role="button"]',
+    'input[type="submit"]',
+]
+
+
+def capture_multi_screenshots(
+    url: str,
+    output_dir: Path,
+    config: dict[str, Any],
+    *,
+    browser: Any = None,
+) -> dict[str, str | None]:
+    """Capture initial page screenshot and post-CTA-click screenshot.
+
+    Opens the URL, takes an initial screenshot of the landing page, then
+    searches for the first obvious CTA button (download, continue, etc.).
+    If a CTA is found it is clicked, a short wait allows the page to
+    react, and a second screenshot is captured.
+
+    Args:
+        url: The URL to screenshot.
+        output_dir: Directory to save the screenshot PNGs.
+        config: The loaded IRIS configuration dictionary.
+        browser: Optional shared Playwright Browser instance. When provided,
+            a new context is created from it instead of launching a new browser.
+
+    Returns:
+        Dict with keys:
+        - 'initial': filename of initial screenshot (or None)
+        - 'initial_url': the URL shown on initial load
+        - 'cta': filename of post-CTA screenshot (or None if no CTA found/clicked)
+        - 'cta_url': the URL after clicking the CTA (or None)
+        - 'cta_text': text of the CTA button that was clicked (or None)
+    """
+    result: dict[str, str | None] = {
+        "initial": None,
+        "initial_url": None,
+        "cta": None,
+        "cta_url": None,
+        "cta_text": None,
+    }
+
+    timeout_ms = config.get("requests", {}).get("timeout", 10) * 1000
+    nav_timeout_ms = max(timeout_ms * 3, 15000)
+
+    parsed = urlparse(url)
+    domain = (parsed.hostname or "unknown").replace(".", "_")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    own_browser = browser is None
+    pw_ctx = None
+
+    try:
+        if own_browser:
+            pw_ctx = sync_playwright().start()
+            browser = launch_browser(pw_ctx, url)
+
+        context = create_context(browser)
+        page = context.new_page()
+
+        # Navigate to the URL
+        status = navigate_with_bypass(page, url, timeout_ms=nav_timeout_ms)
+        if status == 0:
+            context.close()
+            if own_browser:
+                browser.close()
+                pw_ctx.stop()
+            logger.warning("Multi-screenshot navigation failed for %s", url)
+            return result
+
+        # ---- Screenshot #1: Initial page load ----
+        initial_url = page.url
+        result["initial_url"] = initial_url
+
+        _inject_url_banner(page, initial_url, url)
+        _annotate_suspicious_elements(page)
+
+        initial_filename = f"{domain}_{timestamp}_initial.png"
+        initial_path = output_dir / initial_filename
+        page.screenshot(path=str(initial_path), full_page=True)
+        result["initial"] = initial_filename
+        logger.info("Multi-screenshot initial saved: %s", initial_path)
+
+        # ---- Find and click the first CTA button ----
+        cta_patterns_json = json.dumps(_CTA_TEXT_PATTERNS)
+        cta_selectors_json = json.dumps(_CTA_SELECTORS)
+
+        cta_candidates = page.evaluate(f"""() => {{
+            const textPatterns = {cta_patterns_json};
+            const selectors = {cta_selectors_json};
+            const results = [];
+            const seen = new Set();
+
+            // Helper: check if an element's text matches a CTA pattern
+            function matchesCTA(el) {{
+                const text = (el.textContent || el.value || '').trim();
+                // Skip elements with too-short or too-long text
+                if (text.length < 3 || text.length > 50) return null;
+                const lower = text.toLowerCase();
+                for (const pattern of textPatterns) {{
+                    if (lower.includes(pattern)) {{
+                        return text;
+                    }}
+                }}
+                return null;
+            }}
+
+            // Check elements matching CTA selectors
+            for (const selector of selectors) {{
+                try {{
+                    const elements = document.querySelectorAll(selector);
+                    for (const el of elements) {{
+                        // Skip hidden or zero-size elements
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        if (el.offsetParent === null && el.style.position !== 'fixed') continue;
+
+                        const matchedText = matchesCTA(el);
+                        if (matchedText && !seen.has(el)) {{
+                            seen.add(el);
+                            // Build a unique selector path for this element
+                            let path = el.tagName.toLowerCase();
+                            if (el.id) path += '#' + el.id;
+                            else if (el.className && typeof el.className === 'string')
+                                path += '.' + el.className.split(/\\s+/).filter(Boolean).join('.');
+                            results.push({{
+                                text: matchedText,
+                                selector: path,
+                                index: results.length
+                            }});
+                        }}
+                    }}
+                }} catch(e) {{}}
+            }}
+
+            // Also walk all interactive-looking elements for CTA text
+            const walker = document.createTreeWalker(
+                document.body,
+                NodeFilter.SHOW_ELEMENT,
+                null
+            );
+            while (walker.nextNode()) {{
+                const node = walker.currentNode;
+                const tag = node.tagName.toLowerCase();
+                if (!['a', 'button', 'div', 'span', 'input'].includes(tag)) continue;
+                if (seen.has(node)) continue;
+
+                const rect = node.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+
+                const matchedText = matchesCTA(node);
+                if (matchedText) {{
+                    seen.add(node);
+                    let path = tag;
+                    if (node.id) path += '#' + node.id;
+                    else if (node.className && typeof node.className === 'string')
+                        path += '.' + node.className.split(/\\s+/).filter(Boolean).join('.');
+                    results.push({{
+                        text: matchedText,
+                        selector: path,
+                        index: results.length
+                    }});
+                }}
+            }}
+
+            return results;
+        }}""")
+
+        if cta_candidates:
+            cta = cta_candidates[0]
+            cta_text = cta["text"]
+            logger.info(
+                "Multi-screenshot found CTA button: %r on %s", cta_text, url,
+            )
+
+            # Click the first CTA candidate using its text content
+            try:
+                # Use Playwright's text-based locator for reliable clicking
+                clicked = page.evaluate(f"""() => {{
+                    const textPatterns = {cta_patterns_json};
+                    const selectors = {cta_selectors_json};
+                    const seen = new Set();
+
+                    function matchesCTA(el) {{
+                        const text = (el.textContent || el.value || '').trim();
+                        if (text.length < 3 || text.length > 50) return null;
+                        const lower = text.toLowerCase();
+                        for (const pattern of textPatterns) {{
+                            if (lower.includes(pattern)) return text;
+                        }}
+                        return null;
+                    }}
+
+                    // First check selector-matched elements
+                    for (const selector of selectors) {{
+                        try {{
+                            const elements = document.querySelectorAll(selector);
+                            for (const el of elements) {{
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width === 0 || rect.height === 0) continue;
+                                if (el.offsetParent === null && el.style.position !== 'fixed') continue;
+                                if (matchesCTA(el)) {{
+                                    el.click();
+                                    return true;
+                                }}
+                            }}
+                        }} catch(e) {{}}
+                    }}
+
+                    // Walk all interactive elements
+                    const walker = document.createTreeWalker(
+                        document.body, NodeFilter.SHOW_ELEMENT, null
+                    );
+                    while (walker.nextNode()) {{
+                        const node = walker.currentNode;
+                        const tag = node.tagName.toLowerCase();
+                        if (!['a', 'button', 'div', 'span', 'input'].includes(tag)) continue;
+                        const rect = node.getBoundingClientRect();
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        if (matchesCTA(node)) {{
+                            node.click();
+                            return true;
+                        }}
+                    }}
+
+                    return false;
+                }}""")
+
+                if clicked:
+                    result["cta_text"] = cta_text
+
+                    # Wait for navigation or content change
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=3000)
+                    except PlaywrightTimeout:
+                        pass
+                    # Additional fixed wait for dynamic content
+                    page.wait_for_timeout(3000)
+
+                    # ---- Screenshot #2: After CTA click ----
+                    cta_url = page.url
+                    result["cta_url"] = cta_url
+
+                    # Remove old banner before injecting the new one
+                    page.evaluate("""() => {
+                        const old = document.getElementById('iris-url-banner');
+                        if (old) old.remove();
+                    }""")
+
+                    _inject_url_banner(page, cta_url, url)
+                    _annotate_suspicious_elements(page)
+
+                    cta_filename = f"{domain}_{timestamp}_cta.png"
+                    cta_path = output_dir / cta_filename
+                    page.screenshot(path=str(cta_path), full_page=True)
+                    result["cta"] = cta_filename
+                    logger.info("Multi-screenshot CTA saved: %s", cta_path)
+                else:
+                    logger.debug("CTA click returned false for %s", url)
+
+            except Exception as click_exc:
+                logger.warning(
+                    "Failed to click CTA on %s: %s", url, click_exc,
+                )
+        else:
+            logger.debug("No CTA buttons found on %s", url)
+
+        context.close()
+        if own_browser:
+            browser.close()
+            pw_ctx.stop()
+
+        return result
+
+    except PlaywrightTimeout:
+        logger.warning("Multi-screenshot timed out for %s", url)
+        return result
+    except Exception as exc:
+        logger.error("Multi-screenshot failed for %s: %s", url, exc)
+        return result

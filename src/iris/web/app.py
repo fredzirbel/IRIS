@@ -691,6 +691,9 @@ async def results(request: Request, scan_id: str) -> HTMLResponse:
 
     report_json = json.dumps(_report_to_copydata(entry), default=str)
 
+    # Extract multi-screenshot data for the template
+    multi_ss = getattr(entry["report"], "multi_screenshots", {}) or {}
+
     return templates.TemplateResponse(
         "results.html",
         {
@@ -698,6 +701,7 @@ async def results(request: Request, scan_id: str) -> HTMLResponse:
             "streaming": False,
             "report_json": report_json,
             "bulk_id": bulk_id,
+            "multi_screenshots": multi_ss,
             **entry,
         },
     )
@@ -986,6 +990,159 @@ def _report_to_copydata(entry: dict[str, Any]) -> dict[str, Any]:
         "findings": findings,
         "file_download": file_dl,
     }
+
+
+# ---------------------------------------------------------------------------
+# Escalation report generator
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/escalation/{scan_id}")
+async def api_escalation(scan_id: str, request: Request) -> JSONResponse:
+    """Generate a pre-filled escalation report from scan results.
+
+    Accepts optional alert context (UPN, sender, subject, etc.) to
+    produce a more complete report.  When alert context is omitted,
+    placeholder markers are left for the analyst to fill in.
+
+    Args:
+        scan_id: The unique scan identifier.
+        request: The incoming HTTP request with optional JSON body.
+
+    Returns:
+        JSON with ``escalation_md`` (the markdown report) and
+        ``kql_queries`` (list of ready-to-paste KQL queries).
+    """
+    from iris.web.escalation import generate_escalation, generate_kql_queries
+
+    entry = _scans.get(scan_id)
+    if entry is None:
+        return JSONResponse(
+            {"error": "Scan not found", "scan_id": scan_id},
+            status_code=404,
+        )
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass  # No body is fine — alert context is optional
+
+    alert_context = body.get("alert_context") if body else None
+    scan_data = _report_to_copydata(entry)
+
+    escalation_md = generate_escalation(scan_data, alert_context)
+
+    # Build KQL queries
+    sender_domain = ""
+    if alert_context and alert_context.get("sender"):
+        sender = alert_context["sender"]
+        if "@" in sender:
+            sender_domain = sender.split("@", 1)[1]
+
+    kql_queries = generate_kql_queries(
+        domain=entry.get("domain", ""),
+        url=entry["report"].url,
+        sender_domain=sender_domain,
+    )
+
+    return JSONResponse({
+        "escalation_md": escalation_md,
+        "kql_queries": kql_queries,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Sender IP enrichment
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/enrich-ip")
+async def api_enrich_ip(request: Request) -> JSONResponse:
+    """Enrich a sender IP address with VirusTotal and AbuseIPDB lookups.
+
+    Accepts JSON body ``{"ip": "1.2.3.4"}`` and returns enrichment data.
+
+    Args:
+        request: The incoming HTTP request with JSON body.
+
+    Returns:
+        JSON with VT and AbuseIPDB enrichment results.
+    """
+    body = await request.json()
+    ip = (body.get("ip") or "").strip()
+
+    if not ip or not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+        return JSONResponse(
+            {"error": "Invalid IPv4 address."},
+            status_code=400,
+        )
+
+    results: dict[str, Any] = {
+        "ip": ip,
+        "vt_link": f"https://www.virustotal.com/gui/ip-address/{ip}",
+        "abuseipdb_link": f"https://www.abuseipdb.com/check/{ip}",
+        "vt": None,
+        "abuseipdb": None,
+    }
+
+    timeout = _config.get("requests", {}).get("timeout", 10)
+
+    # VirusTotal IP lookup
+    vt_key = get_api_key(_config, "virustotal")
+    if vt_key:
+        try:
+            vt_resp = http_requests.get(
+                f"https://www.virustotal.com/api/v3/ip_addresses/{ip}",
+                headers={"x-apikey": vt_key},
+                timeout=timeout,
+            )
+            if vt_resp.status_code == 200:
+                vt_data = vt_resp.json()
+                attrs = vt_data.get("data", {}).get("attributes", {})
+                stats = attrs.get("last_analysis_stats", {})
+                results["vt"] = {
+                    "malicious": stats.get("malicious", 0),
+                    "suspicious": stats.get("suspicious", 0),
+                    "harmless": stats.get("harmless", 0),
+                    "undetected": stats.get("undetected", 0),
+                    "total": sum(stats.values()) if stats else 0,
+                    "country": attrs.get("country", ""),
+                    "as_owner": attrs.get("as_owner", ""),
+                    "asn": attrs.get("asn", 0),
+                }
+        except http_requests.exceptions.RequestException as exc:
+            logger.warning("VT IP lookup failed for %s: %s", ip, exc)
+
+    # AbuseIPDB lookup
+    abuseipdb_key = get_api_key(_config, "abuseipdb")
+    if abuseipdb_key:
+        try:
+            abuse_resp = http_requests.get(
+                "https://api.abuseipdb.com/api/v2/check",
+                headers={
+                    "Key": abuseipdb_key,
+                    "Accept": "application/json",
+                },
+                params={"ipAddress": ip, "maxAgeInDays": "90"},
+                timeout=timeout,
+            )
+            if abuse_resp.status_code == 200:
+                abuse_data = abuse_resp.json().get("data", {})
+                results["abuseipdb"] = {
+                    "abuse_confidence": abuse_data.get(
+                        "abuseConfidenceScore", 0,
+                    ),
+                    "total_reports": abuse_data.get("totalReports", 0),
+                    "country_code": abuse_data.get("countryCode", ""),
+                    "isp": abuse_data.get("isp", ""),
+                    "domain": abuse_data.get("domain", ""),
+                    "is_tor": abuse_data.get("isTor", False),
+                }
+        except http_requests.exceptions.RequestException as exc:
+            logger.warning("AbuseIPDB lookup failed for %s: %s", ip, exc)
+
+    return JSONResponse(results)
 
 
 # ---------------------------------------------------------------------------

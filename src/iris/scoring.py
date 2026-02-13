@@ -20,6 +20,8 @@ _DEFAULT_FEED_WEIGHTS: dict[str, float] = {
     "AbuseIPDB": 25.0,
 }
 
+_THREAT_FEED_ANALYZER_NAME = "Threat Feed Integration"
+
 
 def calculate_score(
     results: list[AnalyzerResult],
@@ -54,11 +56,28 @@ def calculate_score(
     # ------------------------------------------------------------------
     # Step 1: Raw weighted analyzer score
     # ------------------------------------------------------------------
-    total_weight = sum(r.max_weight for r in completed)
+    scoring_cfg = config.get("scoring", {})
+    blend = scoring_cfg.get("blend", {})
+    analyzer_blend = blend.get("analyzer_weight", 0.45)
+    feed_blend = blend.get("feed_weight", 0.55)
+
+    # Threat feeds are blended explicitly via feed_signal (Step 2/3). When
+    # feed blending is active, exclude the "Threat Feed Integration" analyzer
+    # from Step 1 so the same feed evidence is not counted twice.
+    analyzer_inputs = list(completed)
+    if feed_blend > 0 and feed_results:
+        analyzer_inputs = [
+            r for r in completed if r.analyzer_name != _THREAT_FEED_ANALYZER_NAME
+        ]
+        if not analyzer_inputs:
+            analyzer_inputs = list(completed)
+
+    total_weight = sum(r.max_weight for r in analyzer_inputs)
     raw_score = 0.0
-    for result in completed:
-        normalized_weight = result.max_weight / total_weight
-        raw_score += result.score * normalized_weight
+    if total_weight > 0:
+        for result in analyzer_inputs:
+            normalized_weight = result.max_weight / total_weight
+            raw_score += result.score * normalized_weight
 
     # ------------------------------------------------------------------
     # Step 2: Graduated feed signal
@@ -68,11 +87,6 @@ def calculate_score(
     # ------------------------------------------------------------------
     # Step 3: Composite score (blend analyzers + feeds)
     # ------------------------------------------------------------------
-    scoring_cfg = config.get("scoring", {})
-    blend = scoring_cfg.get("blend", {})
-    analyzer_blend = blend.get("analyzer_weight", 0.45)
-    feed_blend = blend.get("feed_weight", 0.55)
-
     # If no feeds are configured at all, give all weight to analyzers.
     has_any_feed_configured = len(feed_results) > 0
     if not has_any_feed_configured:

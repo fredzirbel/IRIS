@@ -264,7 +264,8 @@ class LinkDiscoveryAnalyzer(BaseAnalyzer):
 
             for (const sel of selectors) {
                 for (const el of document.querySelectorAll(sel)) {
-                    const text = (el.textContent || el.value || '').trim();
+                    const rawText = (el.textContent ?? el.value ?? '');
+                    const text = String(rawText).trim();
                     if (!text || text.length > 100) continue;
 
                     const href = el.getAttribute('href') || '';

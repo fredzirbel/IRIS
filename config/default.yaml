@@ -8,12 +8,18 @@ api_keys:
 
 scoring:
   weights:
+    # Analyzer weights are now validated and must sum to 100.
+    # Threat feeds are scored via scoring.blend/feed_weights (below), so
+    # the analyzer-layer threat_feeds weight is intentionally 0 to avoid
+    # double-counting the same feed signal.
     url_lexical: 20
     whois_dns: 15
-    ssl_tls: 15
+    ssl_tls: 10
     http_response: 15
     page_content: 15
-    threat_feeds: 20
+    link_discovery: 10
+    download: 15
+    threat_feeds: 0
   thresholds:
     safe: 25
     malicious: 60
@@ -29,7 +35,8 @@ requests:
   timeout: 10
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
   max_redirects: 10
-  verify_ssl: false
+  # Production-safe default. Set false only for controlled lab analysis.
+  verify_ssl: true
 
 brands:
   - google.com

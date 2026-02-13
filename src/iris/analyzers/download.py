@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -189,11 +190,14 @@ class DownloadAnalyzer(BaseAnalyzer):
         # interstitials that gate file downloads.
         # -----------------------------------------------------------------
         browser_dl_info: dict[str, Any] | None = None
+        temp_download_paths: list[str] = []
 
         if not is_download and browser is not None:
             browser_dl_info = self._browser_download(url, browser)
             if browser_dl_info:
                 is_download = True
+                if browser_dl_info.get("path"):
+                    temp_download_paths.append(browser_dl_info["path"])
                 content_type = browser_dl_info.get("content_type", content_type)
                 if browser_dl_info.get("suggested_filename"):
                     content_disp = browser_dl_info["suggested_filename"]
@@ -327,6 +331,7 @@ class DownloadAnalyzer(BaseAnalyzer):
         if not sha256 and requests_blocked and browser is not None and not browser_dl_info:
             browser_dl_info = self._browser_download(url, browser)
             if browser_dl_info and browser_dl_info.get("path"):
+                temp_download_paths.append(browser_dl_info["path"])
                 sha1, sha256, size_bytes = self._hash_local_file(
                     browser_dl_info["path"],
                 )
@@ -351,6 +356,9 @@ class DownloadAnalyzer(BaseAnalyzer):
 
         self.last_file_info = file_info
         score = min(100.0, sum(f.score_contribution for f in findings))
+
+        for temp_path in temp_download_paths:
+            self._cleanup_temp_download(temp_path)
 
         return AnalyzerResult(
             analyzer_name=self.name,
@@ -568,6 +576,26 @@ class DownloadAnalyzer(BaseAnalyzer):
         except Exception as exc:
             logger.debug("Failed to hash local file %s: %s", file_path, exc)
             return "", "", 0
+
+    def _cleanup_temp_download(self, file_path: str) -> None:
+        """Delete temporary browser download file and its temp directory.
+
+        Args:
+            file_path: Path to the downloaded file created by _browser_download.
+        """
+        if not file_path:
+            return
+
+        try:
+            p = Path(file_path)
+            if p.exists():
+                p.unlink(missing_ok=True)
+
+            parent = p.parent
+            if parent.name.startswith("iris_dl_") and parent.exists():
+                shutil.rmtree(parent, ignore_errors=True)
+        except Exception as exc:
+            logger.debug("Failed to cleanup temp download %s: %s", file_path, exc)
 
     def _extract_filename(self, content_disp: str, path: PurePosixPath) -> str:
         """Extract filename from Content-Disposition header or URL path.

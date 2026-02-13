@@ -17,6 +17,23 @@ _ENV_KEY_MAP: dict[str, str] = {
     "ABUSEIPDB_API_KEY": "abuseipdb",
 }
 
+_EXPECTED_SCORING_WEIGHT_KEYS = {
+    "url_lexical",
+    "whois_dns",
+    "ssl_tls",
+    "http_response",
+    "page_content",
+    "link_discovery",
+    "download",
+    "threat_feeds",
+}
+
+_EXPECTED_FEED_WEIGHT_KEYS = {
+    "VirusTotal",
+    "Google Safe Browsing",
+    "AbuseIPDB",
+}
+
 
 # Search for config in common locations
 _POSSIBLE_CONFIG_PATHS = [
@@ -40,6 +57,93 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             merged[key] = value
     return merged
+
+
+def _require_numeric(
+    container: dict[str, Any],
+    key: str,
+    *,
+    min_value: float | None = None,
+) -> float:
+    """Return a numeric config value or raise ValueError."""
+    value = container.get(key)
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"Config key '{key}' must be a number")
+    value_f = float(value)
+    if min_value is not None and value_f < min_value:
+        raise ValueError(f"Config key '{key}' must be >= {min_value}")
+    return value_f
+
+
+def _validate_scoring_config(config: dict[str, Any]) -> None:
+    """Validate scoring-related config for production safety."""
+    scoring = config.get("scoring", {})
+    if not isinstance(scoring, dict):
+        raise ValueError("Config key 'scoring' must be a mapping")
+
+    weights = scoring.get("weights", {})
+    if not isinstance(weights, dict):
+        raise ValueError("Config key 'scoring.weights' must be a mapping")
+
+    missing_weight_keys = sorted(_EXPECTED_SCORING_WEIGHT_KEYS - set(weights.keys()))
+    extra_weight_keys = sorted(set(weights.keys()) - _EXPECTED_SCORING_WEIGHT_KEYS)
+    if missing_weight_keys:
+        raise ValueError(
+            "Missing scoring.weights keys: " + ", ".join(missing_weight_keys)
+        )
+    if extra_weight_keys:
+        raise ValueError(
+            "Unknown scoring.weights keys: " + ", ".join(extra_weight_keys)
+        )
+
+    weight_total = 0.0
+    for key in _EXPECTED_SCORING_WEIGHT_KEYS:
+        weight_total += _require_numeric(weights, key, min_value=0.0)
+    if abs(weight_total - 100.0) > 0.001:
+        raise ValueError(
+            f"scoring.weights must sum to 100.0 (got {weight_total:.3f})"
+        )
+
+    thresholds = scoring.get("thresholds", {})
+    if not isinstance(thresholds, dict):
+        raise ValueError("Config key 'scoring.thresholds' must be a mapping")
+    safe_threshold = _require_numeric(thresholds, "safe", min_value=0.0)
+    malicious_threshold = _require_numeric(thresholds, "malicious", min_value=0.0)
+    if safe_threshold >= malicious_threshold:
+        raise ValueError(
+            "scoring.thresholds.safe must be less than scoring.thresholds.malicious"
+        )
+
+    blend = scoring.get("blend", {})
+    if not isinstance(blend, dict):
+        raise ValueError("Config key 'scoring.blend' must be a mapping")
+    analyzer_weight = _require_numeric(blend, "analyzer_weight", min_value=0.0)
+    feed_weight = _require_numeric(blend, "feed_weight", min_value=0.0)
+    if abs((analyzer_weight + feed_weight) - 1.0) > 0.001:
+        raise ValueError(
+            "scoring.blend.analyzer_weight + scoring.blend.feed_weight must equal 1.0"
+        )
+
+    feed_weights = scoring.get("feed_weights", {})
+    if not isinstance(feed_weights, dict):
+        raise ValueError("Config key 'scoring.feed_weights' must be a mapping")
+    missing_feed_weight_keys = sorted(_EXPECTED_FEED_WEIGHT_KEYS - set(feed_weights.keys()))
+    extra_feed_weight_keys = sorted(set(feed_weights.keys()) - _EXPECTED_FEED_WEIGHT_KEYS)
+    if missing_feed_weight_keys:
+        raise ValueError(
+            "Missing scoring.feed_weights keys: " + ", ".join(missing_feed_weight_keys)
+        )
+    if extra_feed_weight_keys:
+        raise ValueError(
+            "Unknown scoring.feed_weights keys: " + ", ".join(extra_feed_weight_keys)
+        )
+    feed_weight_total = 0.0
+    for key in _EXPECTED_FEED_WEIGHT_KEYS:
+        feed_weight_total += _require_numeric(feed_weights, key, min_value=0.0)
+    if abs(feed_weight_total - 100.0) > 0.001:
+        raise ValueError(
+            f"scoring.feed_weights must sum to 100.0 (got {feed_weight_total:.3f})"
+        )
 
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
@@ -81,6 +185,8 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
         value = os.getenv(env_var, "")
         if value:
             api_keys[key_name] = value
+
+    _validate_scoring_config(config)
 
     return config
 

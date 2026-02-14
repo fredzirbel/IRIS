@@ -36,7 +36,7 @@
 <!-- Screenshot -->
 <section class="card" id="section-screenshot">
     <details open>
-        <summary class="section-toggle">Page Screenshot</summary>
+        <summary class="section-toggle">Screenshots</summary>
         <div class="section-body" id="screenshot-body">
             <div class="skeleton-loading">Capturing screenshot&hellip;</div>
         </div>
@@ -80,14 +80,6 @@
     <details open>
         <summary class="section-toggle">OSINT Links</summary>
         <div class="section-body" id="osint-body"></div>
-    </details>
-</section>
-
-<!-- Multi-Screenshots (hidden until data) -->
-<section class="card" id="section-multi-screenshots" style="display:none;">
-    <details open>
-        <summary class="section-toggle">Screenshots (Initial &amp; CTA Click)</summary>
-        <div class="section-body" id="multi-screenshots-body"></div>
     </details>
 </section>
 
@@ -250,6 +242,32 @@
         return '<button class="copy-chip" data-copy="' + encoded + '" title="Copy">&#128203;</button>';
     }
 
+    function toBase64Url(str) {
+        try {
+            var bytes = new TextEncoder().encode(str);
+            var binary = "";
+            for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+            return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        } catch (err) {
+            return "";
+        }
+    }
+
+    function getFeedPivotUrl(feedName) {
+        if (feedName === "VirusTotal" && _reportData.url) {
+            var vtId = toBase64Url(_reportData.url);
+            return vtId ? "https://www.virustotal.com/gui/url/" + vtId : "";
+        }
+        if (feedName === "Google Safe Browsing" && _reportData.url) {
+            return "https://transparencyreport.google.com/safe-browsing/search?url=" +
+                encodeURIComponent(_reportData.url);
+        }
+        if (feedName === "AbuseIPDB" && _reportData.ip) {
+            return "https://www.abuseipdb.com/check/" + encodeURIComponent(_reportData.ip);
+        }
+        return "";
+    }
+
     /* ---- already_complete: redirect to static results ---- */
     es.addEventListener("already_complete", function () {
         es.close();
@@ -343,20 +361,57 @@
         }
     });
 
-    /* ---- screenshot ---- */
-    es.addEventListener("screenshot", function (e) {
-        var d = JSON.parse(e.data);
+    var _screenshotState = {
+        singleFilename: null,
+        singleReceived: false,
+        multi: null
+    };
+
+    function renderScreenshots() {
         var body = document.getElementById("screenshot-body");
-        if (d.filename) {
-            body.innerHTML = '<div class="screenshot-wrapper">' +
-                '<img src="/screenshots/' + esc(d.filename) + '" alt="Screenshot" class="screenshot-img">' +
-                '</div>';
-        } else {
+        if (!body) return;
+
+        var multi = _screenshotState.multi || {};
+        var initial = multi.initial || _screenshotState.singleFilename;
+        if (initial || multi.cta) {
+            var html = '<div class="multi-screenshot-grid">';
+            if (initial) {
+                html += '<div class="multi-screenshot-item">' +
+                    '<div class="multi-screenshot-label">Initial Page</div>';
+                if (multi.initial_url) html += '<div class="multi-screenshot-url">' + esc(defang(multi.initial_url)) + '</div>';
+                html += '<img src="/screenshots/' + esc(initial) + '" alt="Initial page" class="screenshot-img">' +
+                    '</div>';
+            }
+            if (multi.cta) {
+                html += '<div class="multi-screenshot-item">' +
+                    '<div class="multi-screenshot-label label-cta">After Click: ' + esc(multi.cta_text || "CTA") + '</div>';
+                if (multi.cta_url) html += '<div class="multi-screenshot-url">' + esc(defang(multi.cta_url)) + '</div>';
+                html += '<img src="/screenshots/' + esc(multi.cta) + '" alt="After CTA click" class="screenshot-img">' +
+                    '</div>';
+            }
+            html += '</div>';
+            body.innerHTML = html;
+            return;
+        }
+
+        if (_screenshotState.singleReceived) {
+            var isDownloadRisk = _reportData.riskCategory === "Malicious File Download" ||
+                _reportData.riskCategory === "Suspicious File Download";
             body.innerHTML = '<div class="screenshot-unavailable">' +
                 '<div class="screenshot-unavailable-icon">&#128247;</div>' +
                 '<p>Screenshot unavailable</p>' +
-                '<p class="muted">The site blocked the capture or the connection timed out.</p></div>';
+                '<p class="muted">' + (isDownloadRisk
+                    ? 'This URL appears to trigger a direct file download, so there may be no renderable page to capture.'
+                    : 'The site blocked the capture or the connection timed out.') + '</p></div>';
         }
+    }
+
+    /* ---- screenshot ---- */
+    es.addEventListener("screenshot", function (e) {
+        var d = JSON.parse(e.data);
+        _screenshotState.singleReceived = true;
+        _screenshotState.singleFilename = d.filename || null;
+        renderScreenshots();
     });
 
     /* ---- feed_results ---- */
@@ -377,7 +432,13 @@
             var badge = f.matched
                 ? '<span class="badge badge-malicious">MATCH</span>'
                 : '<span class="badge badge-status-skipped">Not Found</span>';
-            html += '<tr' + cls + '><td>' + esc(f.feed_name) + '</td><td>' + badge + '</td>' +
+            var feedNameHtml = esc(f.feed_name);
+            var pivotUrl = f.matched ? getFeedPivotUrl(f.feed_name) : "";
+            if (pivotUrl) {
+                feedNameHtml = '<a href="' + esc(pivotUrl) + '" target="_blank" rel="noopener noreferrer">' +
+                    esc(f.feed_name) + '</a>';
+            }
+            html += '<tr' + cls + '><td>' + feedNameHtml + '</td><td>' + badge + '</td>' +
                 '<td>' + esc(f.details || "\u2014") + '</td></tr>';
         });
         html += '</tbody></table>';
@@ -410,19 +471,6 @@
 
         /* Hash + VT */
         html += '<div class="file-dl-details">';
-        if (info.sha1) {
-            html += '<div class="file-dl-row"><span class="file-dl-key">SHA-1</span><span class="file-dl-val">';
-            html += '<code class="hash-value">' + esc(info.sha1) + '</code>' + copyBtnHtml(info.sha1);
-            html += '</span></div>';
-        }
-        html += '<div class="file-dl-row"><span class="file-dl-key">SHA-256</span><span class="file-dl-val">';
-        if (info.sha256) {
-            html += '<code class="hash-value">' + esc(info.sha256) + '</code>' + copyBtnHtml(info.sha256);
-        } else {
-            html += '<span class="muted">Could not compute hash</span>';
-        }
-        html += '</span></div>';
-
         html += '<div class="file-dl-row">';
         if (info.vt_link) {
             html += '<a href="' + esc(info.vt_link) + '" target="_blank" rel="noopener noreferrer" class="file-dl-key file-dl-key-link">VirusTotal</a>';
@@ -440,7 +488,22 @@
         } else {
             html += '<span class="muted">No API key configured</span>';
         }
-        html += '</span></div></div>';
+        html += '</span></div>';
+
+        html += '<div class="file-dl-row"><span class="file-dl-key">SHA-256</span><span class="file-dl-val">';
+        if (info.sha256) {
+            html += '<code class="hash-value">' + esc(info.sha256) + '</code>' + copyBtnHtml(info.sha256);
+        } else {
+            html += '<span class="muted">Could not compute hash</span>';
+        }
+        html += '</span></div>';
+
+        if (info.sha1) {
+            html += '<div class="file-dl-row"><span class="file-dl-key">SHA-1</span><span class="file-dl-val">';
+            html += '<code class="hash-value">' + esc(info.sha1) + '</code>' + copyBtnHtml(info.sha1);
+            html += '</span></div>';
+        }
+        html += '</div>';
 
         /* Meta row */
         html += '<div class="file-dl-meta">';
@@ -510,30 +573,14 @@
         _reportData.riskCategory = d.risk_category;
         _reportData.confidence = d.confidence;
         _reportData.recommendation = d.recommendation;
+        renderScreenshots();
     });
 
     /* ---- multi_screenshots ---- */
     es.addEventListener("multi_screenshots", function (e) {
         var d = JSON.parse(e.data);
-        if (!d.cta) return;  /* Only show when a CTA button was actually clicked */
-        document.getElementById("section-multi-screenshots").style.display = "";
-        var html = '<div class="multi-screenshot-grid">';
-        if (d.initial) {
-            html += '<div class="multi-screenshot-item">' +
-                '<div class="multi-screenshot-label">Initial Page</div>';
-            if (d.initial_url) html += '<div class="multi-screenshot-url">' + esc(defang(d.initial_url)) + '</div>';
-            html += '<img src="/screenshots/' + esc(d.initial) + '" alt="Initial page" class="screenshot-img">' +
-                '</div>';
-        }
-        if (d.cta) {
-            html += '<div class="multi-screenshot-item">' +
-                '<div class="multi-screenshot-label label-cta">After Click: ' + esc(d.cta_text || "CTA") + '</div>';
-            if (d.cta_url) html += '<div class="multi-screenshot-url">' + esc(defang(d.cta_url)) + '</div>';
-            html += '<img src="/screenshots/' + esc(d.cta) + '" alt="After CTA click" class="screenshot-img">' +
-                '</div>';
-        }
-        html += '</div>';
-        document.getElementById("multi-screenshots-body").innerHTML = html;
+        _screenshotState.multi = d;
+        renderScreenshots();
     });
 
     /* ---- complete ---- */
@@ -605,13 +652,13 @@
             lines.push("");
             lines.push("--- File Download ---");
             if (d.fileDownload.filename) lines.push("Filename: " + d.fileDownload.filename);
-            if (d.fileDownload.sha1) lines.push("SHA-1: " + d.fileDownload.sha1);
-            if (d.fileDownload.sha256) lines.push("SHA-256: " + d.fileDownload.sha256);
             if (d.fileDownload.vt_total_engines > 0) {
                 var vtLine = "VirusTotal: " + d.fileDownload.vt_detections + "/" + d.fileDownload.vt_total_engines + " engines";
                 if (d.fileDownload.popular_threat_label) vtLine += " (" + d.fileDownload.popular_threat_label + ")";
                 lines.push(vtLine);
             }
+            if (d.fileDownload.sha256) lines.push("SHA-256: " + d.fileDownload.sha256);
+            if (d.fileDownload.sha1) lines.push("SHA-1: " + d.fileDownload.sha1);
         }
 
         lines.push("");
@@ -750,6 +797,16 @@
    ================================================================ #}
 {% set r = report %}
 {% set cat = r.risk_category.name | lower %}
+{% set feed_pivots = namespace(vt="", gsb="", abuseipdb="") %}
+{% for link in r.osint_links %}
+    {% if link.name == "VirusTotal (URL)" %}
+        {% set feed_pivots.vt = link.url %}
+    {% elif link.name == "Google Transparency" %}
+        {% set feed_pivots.gsb = link.url %}
+    {% elif link.name == "AbuseIPDB" %}
+        {% set feed_pivots.abuseipdb = link.url %}
+    {% endif %}
+{% endfor %}
 
 <!-- Score Banner -->
 <section class="score-banner score-{{ cat }}">
@@ -775,9 +832,30 @@
 <!-- Screenshot -->
 <section class="card">
     <details open>
-        <summary class="section-toggle">Page Screenshot</summary>
+        <summary class="section-toggle">Screenshots</summary>
         <div class="section-body">
-            {% if screenshot_filename %}
+            {% if multi_screenshots and (multi_screenshots.get('initial') or multi_screenshots.get('cta')) %}
+            <div class="multi-screenshot-grid">
+                {% if multi_screenshots.get('initial') or screenshot_filename %}
+                <div class="multi-screenshot-item">
+                    <div class="multi-screenshot-label">Initial Page</div>
+                    {% if multi_screenshots.get('initial_url') %}
+                    <div class="multi-screenshot-url">{{ multi_screenshots.initial_url|defang }}</div>
+                    {% endif %}
+                    <img src="/screenshots/{{ multi_screenshots.get('initial') or screenshot_filename }}" alt="Initial page" class="screenshot-img">
+                </div>
+                {% endif %}
+                {% if multi_screenshots.get('cta') %}
+                <div class="multi-screenshot-item">
+                    <div class="multi-screenshot-label label-cta">After Click: {{ multi_screenshots.get('cta_text', 'CTA') }}</div>
+                    {% if multi_screenshots.get('cta_url') %}
+                    <div class="multi-screenshot-url">{{ multi_screenshots.cta_url|defang }}</div>
+                    {% endif %}
+                    <img src="/screenshots/{{ multi_screenshots.cta }}" alt="After CTA click" class="screenshot-img">
+                </div>
+                {% endif %}
+            </div>
+            {% elif screenshot_filename %}
             <div class="screenshot-wrapper">
                 <img src="/screenshots/{{ screenshot_filename }}" alt="Screenshot of {{ r.url }}" class="screenshot-img">
             </div>
@@ -785,7 +863,11 @@
             <div class="screenshot-unavailable">
                 <div class="screenshot-unavailable-icon">&#128247;</div>
                 <p>Screenshot unavailable</p>
+                {% if cat in ('malicious_download', 'suspicious_download') %}
+                <p class="muted">This URL appears to trigger a direct file download, so there may be no renderable page to capture.</p>
+                {% else %}
                 <p class="muted">The site blocked the capture or the connection timed out.</p>
+                {% endif %}
             </div>
             {% endif %}
         </div>
@@ -828,7 +910,17 @@
                 <tbody>
                     {% for f in r.feed_results|sort(attribute='display_order')|sort(attribute='matched', reverse=true) %}
                     <tr class="{% if f.matched %}feed-match{% endif %}">
-                        <td>{{ f.feed_name }}</td>
+                        <td>
+                            {% if f.matched and f.feed_name == "VirusTotal" and feed_pivots.vt %}
+                            <a href="{{ feed_pivots.vt }}" target="_blank" rel="noopener noreferrer">{{ f.feed_name }}</a>
+                            {% elif f.matched and f.feed_name == "Google Safe Browsing" and feed_pivots.gsb %}
+                            <a href="{{ feed_pivots.gsb }}" target="_blank" rel="noopener noreferrer">{{ f.feed_name }}</a>
+                            {% elif f.matched and f.feed_name == "AbuseIPDB" and feed_pivots.abuseipdb %}
+                            <a href="{{ feed_pivots.abuseipdb }}" target="_blank" rel="noopener noreferrer">{{ f.feed_name }}</a>
+                            {% else %}
+                            {{ f.feed_name }}
+                            {% endif %}
+                        </td>
                         <td>
                             {% if f.matched %}
                             <span class="badge badge-malicious">MATCH</span>
@@ -877,30 +969,6 @@
 
                 <!-- Indented details: hash and VT -->
                 <div class="file-dl-details">
-                    {% if r.file_download.sha1 %}
-                    <div class="file-dl-row">
-                        <span class="file-dl-key">SHA-1</span>
-                        <span class="file-dl-val">
-                            <code class="hash-value">{{ r.file_download.sha1 }}</code><button class="copy-chip" data-copy="{{ r.file_download.sha1 }}" title="Copy">&#128203;</button>
-                        </span>
-                    </div>
-                    {% endif %}
-                    <div class="file-dl-row">
-                        <span class="file-dl-key">SHA-256</span>
-                        <span class="file-dl-val">
-                            {% if r.file_download.sha256 %}
-                            <code class="hash-value">{{ r.file_download.sha256 }}</code><button class="copy-chip" data-copy="{{ r.file_download.sha256 }}" title="Copy">&#128203;</button>
-                            {% else %}
-                            <span class="muted" id="hash-empty-msg">
-                                {% if r.file_download.cloudflare_blocked %}
-                                Could not retrieve file &mdash; use manual lookup below
-                                {% else %}
-                                Could not compute hash
-                                {% endif %}
-                            </span>
-                            {% endif %}
-                        </span>
-                    </div>
                     <div class="file-dl-row">
                         {% if r.file_download.vt_link %}
                         <a href="{{ r.file_download.vt_link }}" target="_blank" rel="noopener noreferrer" class="file-dl-key file-dl-key-link" id="vt-key-label">VirusTotal</a>
@@ -929,6 +997,30 @@
                             {% endif %}
                         </span>
                     </div>
+                    <div class="file-dl-row">
+                        <span class="file-dl-key">SHA-256</span>
+                        <span class="file-dl-val">
+                            {% if r.file_download.sha256 %}
+                            <code class="hash-value">{{ r.file_download.sha256 }}</code><button class="copy-chip" data-copy="{{ r.file_download.sha256 }}" title="Copy">&#128203;</button>
+                            {% else %}
+                            <span class="muted" id="hash-empty-msg">
+                                {% if r.file_download.cloudflare_blocked %}
+                                Could not retrieve file &mdash; use manual lookup below
+                                {% else %}
+                                Could not compute hash
+                                {% endif %}
+                            </span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    {% if r.file_download.sha1 %}
+                    <div class="file-dl-row">
+                        <span class="file-dl-key">SHA-1</span>
+                        <span class="file-dl-val">
+                            <code class="hash-value">{{ r.file_download.sha1 }}</code><button class="copy-chip" data-copy="{{ r.file_download.sha1 }}" title="Copy">&#128203;</button>
+                        </span>
+                    </div>
+                    {% endif %}
                 </div>
 
                 <!-- Secondary metadata row -->
@@ -1114,35 +1206,6 @@
                     <span class="osint-desc">{{ link.description }}</span>
                 </a>
                 {% endfor %}
-            </div>
-        </div>
-    </details>
-</section>
-{% endif %}
-
-<!-- Multi-Screenshots — only shown when a CTA button was actually clicked -->
-{% if multi_screenshots and multi_screenshots.get('cta') %}
-<section class="card">
-    <details open>
-        <summary class="section-toggle">Screenshots (Initial &amp; CTA Click)</summary>
-        <div class="section-body">
-            <div class="multi-screenshot-grid">
-                {% if multi_screenshots.get('initial') %}
-                <div class="multi-screenshot-item">
-                    <div class="multi-screenshot-label">Initial Page</div>
-                    {% if multi_screenshots.get('initial_url') %}
-                    <div class="multi-screenshot-url">{{ multi_screenshots.initial_url|defang }}</div>
-                    {% endif %}
-                    <img src="/screenshots/{{ multi_screenshots.initial }}" alt="Initial page" class="screenshot-img">
-                </div>
-                {% endif %}
-                <div class="multi-screenshot-item">
-                    <div class="multi-screenshot-label label-cta">After Click: {{ multi_screenshots.get('cta_text', 'CTA') }}</div>
-                    {% if multi_screenshots.get('cta_url') %}
-                    <div class="multi-screenshot-url">{{ multi_screenshots.cta_url|defang }}</div>
-                    {% endif %}
-                    <img src="/screenshots/{{ multi_screenshots.cta }}" alt="After CTA click" class="screenshot-img">
-                </div>
             </div>
         </div>
     </details>
@@ -1370,13 +1433,13 @@
             lines.push("");
             lines.push("--- File Download ---");
             if (d.file_download.filename) lines.push("Filename: " + d.file_download.filename);
-            if (d.file_download.sha1) lines.push("SHA-1: " + d.file_download.sha1);
-            if (d.file_download.sha256) lines.push("SHA-256: " + d.file_download.sha256);
             if (d.file_download.vt_total_engines > 0) {
                 var vtLine = "VirusTotal: " + d.file_download.vt_detections + "/" + d.file_download.vt_total_engines + " engines";
                 if (d.file_download.popular_threat_label) vtLine += " (" + d.file_download.popular_threat_label + ")";
                 lines.push(vtLine);
             }
+            if (d.file_download.sha256) lines.push("SHA-256: " + d.file_download.sha256);
+            if (d.file_download.sha1) lines.push("SHA-1: " + d.file_download.sha1);
         }
 
         lines.push("");

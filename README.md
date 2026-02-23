@@ -80,12 +80,12 @@ docker run -p 8000:8000 --shm-size=2g \
 |----------|--------|----------------|
 | **URL Lexical Analysis** | 20 | Domain age indicators, typosquatting (Levenshtein distance), suspicious TLDs, URL shorteners, excessive subdomains, IP-based URLs, homoglyph characters |
 | **WHOIS/DNS Inspection** | 15 | Domain registration age, registrar reputation, missing WHOIS privacy, PTR records, nameserver anomalies |
-| **SSL/TLS Certificate** | 10 | Certificate validity, issuer trust, self-signed detection, expiration, SAN mismatch |
 | **HTTP Response Analysis** | 15 | Redirect chains, missing security headers (CSP, X-Frame-Options), suspicious status codes, cross-domain redirects |
 | **Page Content Analysis** | 15 | Login form detection, brand impersonation keywords, hidden form fields, credential harvesting patterns |
+| **Download Analysis** | 15 | Detects auto-downloads, flags suspicious file extensions, computes SHA-1 and SHA-256, queries VirusTotal for file reputation |
+| **SSL/TLS Certificate** | 10 | Certificate validity, issuer trust, self-signed detection, expiration, SAN mismatch |
 | **Link Discovery** | 10 | Clicks auth-related buttons on the page, inspects destination for credential forms, cross-domain redirects, and brand spoofing |
 | **Threat Feed Integration** | 0 | Queries VirusTotal, Google Safe Browsing, and AbuseIPDB for findings display; feed impact is scored via blended threat-feed signal below |
-| **Download Analysis** | 15 | Detects auto-downloads, flags suspicious file extensions, computes SHA-1 and SHA-256, queries VirusTotal for file reputation |
 
 ## Scoring
 
@@ -110,28 +110,28 @@ Threat feed matches are weighted individually (VirusTotal 40%, Google Safe Brows
 ## Architecture
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │              FastAPI Web UI              │
-                    │         (SSE streaming results)          │
-                    └──────────────┬───────────────────────────┘
-                                   │
-                    ┌──────────────▼───────────────────────────┐
-                    │          Scanner Orchestrator            │
-                    │    (ThreadPoolExecutor + Playwright)     │
-                    └──────────────┬───────────────────────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              │                    │                    │
-     ┌────────▼────────┐ ┌────────▼────────┐ ┌────────▼────────┐
-     │  Thread Pool    │ │  Playwright     │ │  Deferred       │
-     │  (concurrent)   │ │  (sequential)   │ │  (post-browser) │
-     ├─────────────────┤ ├─────────────────┤ ├─────────────────┤
-     │ URL Lexical     │ │ Page Content    │ │ Download        │
-     │ WHOIS/DNS       │ │ Link Discovery  │ │  Analysis       │
-     │ SSL/TLS         │ │                 │ │                 │
-     │ HTTP Response   │ │ Screenshot      │ │                 │
-     │ Threat Feeds    │ │  Capture        │ │                 │
-     └─────────────────┘ └─────────────────┘ └─────────────────┘
+                 ┌──────────────────────────────────────────┐
+                 │              FastAPI Web UI              │
+                 │         (SSE streaming results)          │
+                 └─────────────────────┬────────────────────┘
+                                       │
+                 ┌─────────────────────▼────────────────────┐
+                 │          Scanner Orchestrator            │
+                 │    (ThreadPoolExecutor + Playwright)     │
+                 └─────────────────────┬────────────────────┘
+                                       │
+                   ┌───────────────────┼───────────────────┐
+                   │                   │                   │
+          ┌────────▼────────┐ ┌────────▼────────┐ ┌────────▼────────┐
+          │  Thread Pool    │ │  Playwright     │ │  Deferred       │
+          │  (concurrent)   │ │  (sequential)   │ │  (post-browser) │
+          ├─────────────────┤ ├─────────────────┤ ├─────────────────┤
+          │ URL Lexical     │ │ Page Content    │ │ Download        │
+          │ WHOIS/DNS       │ │ Link Discovery  │ │  Analysis       │
+          │ SSL/TLS         │ │                 │ │                 │
+          │ HTTP Response   │ │ Screenshot      │ │                 │
+          │ Threat Feeds    │ │  Capture        │ │                 │
+          └─────────────────┘ └─────────────────┘ └─────────────────┘
 ```
 
 - **Thread pool analyzers** run concurrently (network I/O bound)
@@ -144,8 +144,9 @@ Threat feed matches are weighted individually (VirusTotal 40%, Google Safe Brows
 
 Each scan report includes one-click links to external tools for deeper investigation:
 
-- **VirusTotal** — URL and domain reputation
-- **VirusTotal (Redirect Hops)** — separate URL and domain lookups for each redirect in the chain
+- **VirusTotal (URL)** — URL reputation lookup
+- **VirusTotal (Domain)** — domain reputation and history
+- **VirusTotal (Redirect Hops)** — individual URL and domain lookups for each unique redirect in the chain
 - **Google Transparency Report** — Safe Browsing status
 - **URLScan.io** — live site scan
 - **who.is** — WHOIS registration lookup

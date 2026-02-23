@@ -27,7 +27,7 @@ IRIS scans URLs across 8 security dimensions simultaneously — lexical analysis
 - **Active Link Discovery** — clicks sign-in/login buttons to find hidden credential harvesters
 - **File Download Analysis** — detects automatic downloads, computes SHA-256, queries VirusTotal
 - **Threat Feed Integration** — VirusTotal (severity-aware detection scaling), Google Safe Browsing, AbuseIPDB
-- **Malpedia Threat Labels** — VT threat labels link directly to Malpedia for malware family research
+- **Clickable Threat Labels** — VT threat labels link to OSINT search for malware family research
 - **OSINT Link Panel** — one-click links to VirusTotal (including redirect hops), URLScan.io, AbuseIPDB, and more
 - **Cloudflare Bypass** — navigates past Cloudflare phishing interstitials for analysis
 - **DNS-over-HTTPS Fallback** — resolves domains blocked by ISP/router DNS filters
@@ -80,16 +80,18 @@ docker run -p 8000:8000 --shm-size=2g \
 |----------|--------|----------------|
 | **URL Lexical Analysis** | 20 | Domain age indicators, typosquatting (Levenshtein distance), suspicious TLDs, URL shorteners, excessive subdomains, IP-based URLs, homoglyph characters |
 | **WHOIS/DNS Inspection** | 15 | Domain registration age, registrar reputation, missing WHOIS privacy, PTR records, nameserver anomalies |
-| **SSL/TLS Certificate** | 15 | Certificate validity, issuer trust, self-signed detection, expiration, SAN mismatch |
+| **SSL/TLS Certificate** | 10 | Certificate validity, issuer trust, self-signed detection, expiration, SAN mismatch |
 | **HTTP Response Analysis** | 15 | Redirect chains, missing security headers (CSP, X-Frame-Options), suspicious status codes, cross-domain redirects |
 | **Page Content Analysis** | 15 | Login form detection, brand impersonation keywords, hidden form fields, credential harvesting patterns |
-| **Link Discovery** | 15 | Clicks auth-related buttons on the page, inspects destination for credential forms, cross-domain redirects, and brand spoofing |
-| **Threat Feed Integration** | 20 | Queries VirusTotal, Google Safe Browsing, and AbuseIPDB for known malicious indicators |
+| **Link Discovery** | 10 | Clicks auth-related buttons on the page, inspects destination for credential forms, cross-domain redirects, and brand spoofing |
+| **Threat Feed Integration** | 0 | Queries VirusTotal, Google Safe Browsing, and AbuseIPDB for findings display; feed impact is scored via blended threat-feed signal below |
 | **Download Analysis** | 15 | Detects auto-downloads, flags suspicious file extensions, computes SHA-256, queries VirusTotal for file reputation |
 
 ## Scoring
 
 IRIS uses a **dual-signal scoring engine** that blends analyzer scores (45%) with threat feed results (55%) into a final 0–100 risk score. Feed scoring is **severity-aware** — a URL flagged by 20 VirusTotal engines scores far higher than one with 3 detections, rather than treating all matches equally.
+
+Threat feeds contribute once through the blended feed signal (not double-counted through analyzer weighting).
 
 | Score | Category | Meaning |
 |-------|----------|---------|
@@ -160,12 +162,14 @@ api_keys:
   abuseipdb: "your-api-key"
 ```
 
+`config/local.yaml` is gitignored. Keep real keys only in local/dev secret stores or environment variables.
+
 ### Configuration Options
 
 | Section | Key | Description |
 |---------|-----|-------------|
 | `api_keys` | `virustotal`, `google_safebrowsing`, `abuseipdb` | API keys for threat feed integration |
-| `scoring.weights` | `url_lexical`, `whois_dns`, `ssl_tls`, etc. | Analyzer weight distribution (must sum to 100) |
+| `scoring.weights` | `url_lexical`, `whois_dns`, `ssl_tls`, `http_response`, `page_content`, `link_discovery`, `download`, `threat_feeds` | Analyzer weight distribution (must sum to 100) |
 | `scoring.thresholds` | `safe`, `malicious` | Score boundaries for 3-tier risk categories |
 | `scoring.blend` | `analyzer_weight`, `feed_weight` | Relative weight of analyzers vs. threat feeds (must sum to 1.0) |
 | `scoring.feed_weights` | `VirusTotal`, `Google Safe Browsing`, `AbuseIPDB` | Per-feed weight distribution for blended scoring |
@@ -186,7 +190,7 @@ iris https://example.com
 # Verbose output with all findings
 iris -v https://suspicious-site.xyz
 
-# Passive-only mode (no HTTP fetch or page rendering)
+# Passive-only mode (lexical-only; no network/browser analyzers)
 iris --no-active https://example.com
 
 # Custom config file
@@ -239,6 +243,7 @@ python -m venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -e ".[dev]"
 playwright install chromium
+pre-commit install
 ```
 
 ### Running Tests
@@ -251,6 +256,12 @@ pytest
 
 ```bash
 ruff check src/
+```
+
+### Secret Scanning
+
+```bash
+pre-commit run --all-files
 ```
 
 ## Tech Stack

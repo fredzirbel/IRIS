@@ -2,6 +2,8 @@
 
 {% block title %}IRIS &mdash; Bulk Scan{% endblock %}
 
+{% block container_class %}container-wide{% endblock %}
+
 {% block content %}
 <section class="hero">
     <h1>Bulk Scan</h1>
@@ -24,15 +26,15 @@
             <div class="progress-fill" id="bulk-progress-bar" style="width:0%"></div>
         </div>
     </div>
-    <table class="table">
+    <table class="table bulk-table">
         <thead>
             <tr>
-                <th style="width:40px">#</th>
+                <th>#</th>
                 <th>URL</th>
-                <th style="width:100px">Status</th>
-                <th style="width:120px">Risk</th>
-                <th style="width:90px">Confidence</th>
-                <th style="width:70px"></th>
+                <th>Status</th>
+                <th>Risk</th>
+                <th>Confidence</th>
+                <th>Report</th>
             </tr>
         </thead>
         <tbody id="bulk-tbody"></tbody>
@@ -128,13 +130,26 @@
         .then(function () { _saving = false; });
     }
 
+    var TOTAL_ANALYZERS = 8;
+    var rowAnalyzerCount = {};  /* track per-row analyzer event count */
+
+    function updateRowProgress(i, count) {
+        var pct = Math.min(100, Math.round((count / TOTAL_ANALYZERS) * 100));
+        var fill = document.getElementById("row-progress-fill-" + i);
+        if (fill) fill.style.width = pct + "%";
+    }
+
     function updateRow(i, status, risk, confidence, scanId) {
         var tr = document.getElementById("bulk-row-" + i);
         if (!tr) return;
         var cells = tr.children;
 
         if (status === "scanning") {
-            cells[2].innerHTML = '<span class="badge" style="background:#1e1b4b;color:#818cf8;">Scanning</span>';
+            cells[2].innerHTML =
+                '<span class="badge" style="background:#1e1b4b;color:#818cf8;">Scanning</span>' +
+                '<div class="row-progress"><div class="row-progress-fill animated" ' +
+                'id="row-progress-fill-' + i + '"></div></div>';
+            rowAnalyzerCount[i] = 0;
         } else if (status === "done") {
             var catMap = {
                 "Safe": "safe", "Uncertain": "uncertain", "Malicious": "malicious",
@@ -146,10 +161,12 @@
             cells[3].innerHTML = '<span class="badge badge-' + cls + '">' + esc(risk) + '</span>';
             cells[4].textContent = confidence ? confidence.toFixed(0) + "%" : "--";
             cells[5].innerHTML = scanId
-                ? '<a href="/results/' + esc(scanId) + '?bulk=' + esc(bulkId) + '" class="btn btn-sm">View</a>'
+                ? '<a href="/results/' + esc(scanId) + '?bulk=' + esc(bulkId) + '" class="btn btn-sm">VIEW</a>'
                 : '';
+            delete rowAnalyzerCount[i];
         } else if (status === "error") {
             cells[2].innerHTML = '<span class="badge badge-status-error">Error</span>';
+            delete rowAnalyzerCount[i];
         }
     }
 
@@ -208,6 +225,11 @@
 
             var scanId = data.scan_id;
             var es = new EventSource("/stream/" + scanId);
+
+            es.addEventListener("analyzer", function () {
+                rowAnalyzerCount[i] = (rowAnalyzerCount[i] || 0) + 1;
+                updateRowProgress(i, rowAnalyzerCount[i]);
+            });
 
             es.addEventListener("score", function (e) {
                 var d = JSON.parse(e.data);

@@ -33,13 +33,13 @@
 {% if recent_scans %}
 <section class="recent">
     <h2>Recent Scans</h2>
-    <table class="table">
+    <table class="table recent-table">
         <thead>
             <tr>
                 <th>URL</th>
                 <th>Risk</th>
                 <th>Confidence</th>
-                <th></th>
+                <th>Report</th>
             </tr>
         </thead>
         <tbody>
@@ -52,7 +52,7 @@
                     </span>
                 </td>
                 <td>{{ "%.0f" | format(entry.report.confidence) }}%</td>
-                <td><a href="/results/{{ entry.scan_id }}" class="btn btn-sm">View</a></td>
+                <td><a href="/results/{{ entry.scan_id }}" class="btn btn-sm">VIEW</a></td>
             </tr>
             {% endfor %}
         </tbody>

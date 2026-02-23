@@ -43,6 +43,18 @@ _DEFERRED_BROWSER_ANALYZERS = {
     "Download Analysis",
 }
 
+# Config key mapping for analyzer weights.
+_ANALYZER_WEIGHT_KEYS = {
+    "URL Lexical Analysis": "url_lexical",
+    "WHOIS/DNS Inspection": "whois_dns",
+    "SSL/TLS Certificate": "ssl_tls",
+    "HTTP Response Analysis": "http_response",
+    "Page Content Analysis": "page_content",
+    "Link Discovery Analysis": "link_discovery",
+    "Download Analysis": "download",
+    "Threat Feed Integration": "threat_feeds",
+}
+
 # ---------------------------------------------------------------------------
 # Thread-local browser pool
 # ---------------------------------------------------------------------------
@@ -187,18 +199,19 @@ def scan_url(
     Args:
         url: The URL to analyze.
         config: The loaded IRIS configuration dictionary.
-        passive_only: If True, skip active analyzers (HTTP fetch, page content).
+        passive_only: If True, run lexical-only mode (no network/browser analyzers).
         screenshot_dir: Directory to save screenshots. Empty string disables.
         on_event: Optional callback for streaming events (SSE).
 
     Returns:
         A completed ScanReport with scores and findings.
     """
-    active_analyzers = {
-        "HTTP Response Analysis",
-        "Page Content Analysis",
-        "Link Discovery Analysis",
+    passive_allowed_analyzers = {
+        # Passive mode is lexical-only: no HTTP/DNS/feed/browser/download calls.
+        "URL Lexical Analysis",
     }
+
+    scoring_weights = config.get("scoring", {}).get("weights", {})
 
     # Separate analyzers into three groups:
     # 1. thread_analyzers: fully thread-safe, run in parallel thread pool
@@ -212,14 +225,25 @@ def scan_url(
 
     for analyzer_cls in ALL_ANALYZERS:
         analyzer = analyzer_cls()
-        if passive_only and analyzer.name in active_analyzers:
+
+        # Apply configured analyzer weights so scoring policy lives in config,
+        # not hard-coded class constants.
+        weight_key = _ANALYZER_WEIGHT_KEYS.get(analyzer.name)
+        if weight_key is not None:
+            configured_weight = scoring_weights.get(weight_key)
+            if isinstance(configured_weight, (int, float)):
+                analyzer.weight = float(configured_weight)
+
+        if passive_only and analyzer.name not in passive_allowed_analyzers:
             skipped_results.append(
                 AnalyzerResult(
                     analyzer_name=analyzer.name,
                     status=AnalyzerStatus.SKIPPED,
                     score=0.0,
                     max_weight=analyzer.weight,
-                    error_message="Skipped (passive-only mode)",
+                    error_message=(
+                        "Skipped (passive-only mode: network/browser analyzers disabled)"
+                    ),
                 )
             )
         elif analyzer.name in _BROWSER_ANALYZERS:
@@ -231,10 +255,11 @@ def scan_url(
 
     # Get or create the persistent shared browser
     shared_browser = None
-    try:
-        _pw, shared_browser = _get_browser(url)
-    except Exception as exc:
-        logger.warning("Failed to get browser: %s", exc)
+    if not passive_only:
+        try:
+            _pw, shared_browser = _get_browser(url)
+        except Exception as exc:
+            logger.warning("Failed to get browser: %s", exc)
 
     # Run thread-safe analyzers in parallel AND browser analyzers
     # sequentially, overlapping the two groups.
@@ -277,12 +302,21 @@ def scan_url(
     # accurate than "Malicious" for payload-delivery URLs.
     file_dl = scan_meta.get("file_download")
     if file_dl and file_dl.detected:
-        if risk_category == RiskCategory.MALICIOUS:
+        # If the file hash has VT detections, it's confirmed malicious
+        # regardless of the composite score (the URL-level feeds may not
+        # have indexed the campaign yet).
+        file_has_vt_detections = file_dl.vt_detections > 0
+
+        if risk_category == RiskCategory.MALICIOUS or file_has_vt_detections:
             risk_category = RiskCategory.MALICIOUS_DOWNLOAD
-            confidence = 100.0  # VT-confirmed malicious download
-        elif risk_category in (RiskCategory.UNCERTAIN, RiskCategory.SAFE):
-            # An automatic file download is inherently anomalous — even if
-            # nothing else is flagged, it should never be labelled "Safe".
+            confidence = 100.0
+            # Ensure score reflects malicious classification
+            malicious_min = config.get("scoring", {}).get(
+                "thresholds", {},
+            ).get("malicious", 60)
+            overall_score = max(overall_score, float(malicious_min))
+        else:
+            # Download detected but no VT hits on the file — suspicious.
             risk_category = RiskCategory.SUSPICIOUS_DOWNLOAD
             safe_max = config.get("scoring", {}).get(
                 "thresholds", {},
@@ -512,21 +546,16 @@ def _build_recommendation(category: RiskCategory) -> str:
         A recommendation string for the analyst.
     """
     recommendations = {
-        RiskCategory.SAFE: "This URL appears safe. No immediate action required.",
-        RiskCategory.UNCERTAIN: (
-            "This URL shows mixed signals. "
-            "Proceed with caution and verify the source before interacting."
-        ),
+        RiskCategory.SAFE: "No significant threat indicators detected.",
+        RiskCategory.UNCERTAIN: "Mixed signals detected.",
         RiskCategory.MALICIOUS: (
-            "This URL is classified as malicious based on multiple security signals."
+            "This URL is classified as malicious."
         ),
         RiskCategory.MALICIOUS_DOWNLOAD: (
-            "This URL delivers a file download flagged as malicious. "
-            "Quarantine and investigate."
+            "This URL delivers a malicious file download."
         ),
         RiskCategory.SUSPICIOUS_DOWNLOAD: (
-            "This URL delivers a suspicious file download. "
-            "Recommend sandbox analysis before interaction."
+            "This URL delivers a suspicious file download."
         ),
     }
     return recommendations.get(category, "Unable to determine risk level.")

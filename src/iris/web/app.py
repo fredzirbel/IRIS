@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -38,7 +39,7 @@ _PROJECT_ROOT = _WEB_DIR.parent.parent.parent
 _SCREENSHOT_DIR = _PROJECT_ROOT / "screenshots"
 
 # ---------------------------------------------------------------------------
-# Dedicated scan executor (single thread)
+# Dedicated scan executor (bounded worker pool)
 # ---------------------------------------------------------------------------
 # Each worker thread gets its own persistent Playwright browser via
 # thread-local storage (see scanner._get_browser).  This allows
@@ -127,6 +128,8 @@ app.mount("/screenshots", StaticFiles(directory=str(_SCREENSHOT_DIR)), name="scr
 # ---------------------------------------------------------------------------
 _scans: dict[str, dict[str, Any]] = {}
 _bulk_scans: dict[str, dict[str, Any]] = {}
+_scans_lock = threading.RLock()
+_bulk_scans_lock = threading.RLock()
 _CACHE_FILE = _SCREENSHOT_DIR / "scan_cache.json"
 _BULK_CACHE_FILE = _SCREENSHOT_DIR / "bulk_cache.json"
 _CACHE_TTL = 86400  # 24 hours in seconds
@@ -142,7 +145,10 @@ def _serialize_scans() -> list[dict]:
     """
 
     entries = []
-    for entry in _scans.values():
+    with _scans_lock:
+        scan_entries = list(_scans.values())
+
+    for entry in scan_entries:
         d = {
             "scan_id": entry["scan_id"],
             "domain": entry["domain"],
@@ -288,7 +294,8 @@ def _load_cache() -> None:
         return
     try:
         data = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
-        _scans = _prune_expired(_deserialize_scans(data))
+        with _scans_lock:
+            _scans = _prune_expired(_deserialize_scans(data))
         logger.info("Loaded %d cached scan(s) from disk.", len(_scans))
     except Exception as exc:
         logger.warning("Failed to load scan cache: %s", exc)
@@ -302,7 +309,8 @@ def _save_cache() -> None:
     """
     global _scans
     try:
-        _scans = _prune_expired(_scans)
+        with _scans_lock:
+            _scans = _prune_expired(_scans)
         payload = json.dumps(_serialize_scans(), default=str, ensure_ascii=False)
         fd, tmp_path = tempfile.mkstemp(
             dir=str(_SCREENSHOT_DIR), suffix=".tmp", prefix="scan_cache_",
@@ -336,13 +344,14 @@ def _load_bulk_cache() -> None:
     try:
         data = json.loads(_BULK_CACHE_FILE.read_text(encoding="utf-8"))
         now = datetime.now(timezone.utc)
-        for bs in data:
-            try:
-                ts = datetime.fromisoformat(bs["created"])
-                if (now - ts).total_seconds() < _CACHE_TTL:
-                    _bulk_scans[bs["bulk_id"]] = bs
-            except (ValueError, TypeError, KeyError):
-                continue
+        with _bulk_scans_lock:
+            for bs in data:
+                try:
+                    ts = datetime.fromisoformat(bs["created"])
+                    if (now - ts).total_seconds() < _CACHE_TTL:
+                        _bulk_scans[bs["bulk_id"]] = bs
+                except (ValueError, TypeError, KeyError):
+                    continue
         logger.info("Loaded %d cached bulk session(s) from disk.", len(_bulk_scans))
     except Exception as exc:
         logger.warning("Failed to load bulk cache: %s", exc)
@@ -353,7 +362,9 @@ def _save_bulk_cache() -> None:
     try:
         now = datetime.now(timezone.utc)
         pruned = {}
-        for bid, bs in _bulk_scans.items():
+        with _bulk_scans_lock:
+            bulk_items = list(_bulk_scans.items())
+        for bid, bs in bulk_items:
             try:
                 ts = datetime.fromisoformat(bs["created"])
                 if (now - ts).total_seconds() < _CACHE_TTL:
@@ -421,7 +432,8 @@ _active_streams: dict[str, asyncio.Queue] = {}
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     """Render the home page with the URL input form."""
-    recent = list(_scans.values())[-10:]
+    with _scans_lock:
+        recent = list(_scans.values())[-10:]
     recent.reverse()
     return templates.TemplateResponse(
         "index.html",
@@ -434,9 +446,8 @@ def scan(request: Request, url: str = Form(...)) -> RedirectResponse:
     """Accept a URL, run the IRIS scan, and redirect to results.
 
     This is a sync handler (not async) so FastAPI runs it in a threadpool.
-    The scan itself is dispatched to the dedicated single-thread executor
-    so that Playwright's persistent browser is always used from the same
-    thread.
+    The scan itself is dispatched to the dedicated worker pool executor
+    where each worker thread has its own persistent Playwright browser.
 
     Args:
         request: The incoming HTTP request.
@@ -474,13 +485,14 @@ def scan(request: Request, url: str = Form(...)) -> RedirectResponse:
     if report.screenshot_path:
         screenshot_filename = Path(report.screenshot_path).name
 
-    _scans[scan_id] = {
-        "scan_id": scan_id,
-        "report": report,
-        "domain": domain,
-        "ip": ip,
-        "screenshot_filename": screenshot_filename,
-    }
+    with _scans_lock:
+        _scans[scan_id] = {
+            "scan_id": scan_id,
+            "report": report,
+            "domain": domain,
+            "ip": ip,
+            "screenshot_filename": screenshot_filename,
+        }
 
     _save_cache()
 
@@ -563,13 +575,14 @@ async def api_scan(request: Request) -> JSONResponse:
             if report.screenshot_path:
                 screenshot_filename = Path(report.screenshot_path).name
 
-            _scans[scan_id] = {
-                "scan_id": scan_id,
-                "report": report,
-                "domain": domain,
-                "ip": ip,
-                "screenshot_filename": screenshot_filename,
-            }
+            with _scans_lock:
+                _scans[scan_id] = {
+                    "scan_id": scan_id,
+                    "report": report,
+                    "domain": domain,
+                    "ip": ip,
+                    "screenshot_filename": screenshot_filename,
+                }
             _save_cache()
 
         except Exception as exc:
@@ -603,7 +616,9 @@ async def stream(scan_id: str) -> StreamingResponse:
 
     if event_queue is None:
         # Scan may already be complete
-        if scan_id in _scans:
+        with _scans_lock:
+            in_scans = scan_id in _scans
+        if in_scans:
             async def done_stream():
                 yield "event: already_complete\ndata: {}\n\n"
             return StreamingResponse(
@@ -673,7 +688,8 @@ async def results(request: Request, scan_id: str) -> HTMLResponse:
             },
         )
 
-    entry = _scans.get(scan_id)
+    with _scans_lock:
+        entry = _scans.get(scan_id)
     if entry is None:
         return templates.TemplateResponse(
             "error.html",
@@ -836,7 +852,8 @@ async def api_results(scan_id: str) -> JSONResponse:
     Returns:
         JSON representation of the ScanReport with defanged URLs.
     """
-    entry = _scans.get(scan_id)
+    with _scans_lock:
+        entry = _scans.get(scan_id)
     if entry is None:
         return JSONResponse(
             {"error": "Scan not found", "scan_id": scan_id},
@@ -907,16 +924,19 @@ async def api_scan_sync(request: Request) -> JSONResponse:
     if report.screenshot_path:
         screenshot_filename = Path(report.screenshot_path).name
 
-    _scans[scan_id] = {
-        "scan_id": scan_id,
-        "report": report,
-        "domain": domain,
-        "ip": ip,
-        "screenshot_filename": screenshot_filename,
-    }
+    with _scans_lock:
+        _scans[scan_id] = {
+            "scan_id": scan_id,
+            "report": report,
+            "domain": domain,
+            "ip": ip,
+            "screenshot_filename": screenshot_filename,
+        }
     _save_cache()
 
-    return JSONResponse(_serialize_report(_scans[scan_id]))
+    with _scans_lock:
+        entry = _scans[scan_id]
+    return JSONResponse(_serialize_report(entry))
 
 
 # ---------------------------------------------------------------------------
@@ -1005,7 +1025,8 @@ async def api_escalation(scan_id: str, request: Request) -> JSONResponse:
     """
     from iris.web.escalation import generate_escalation, generate_kql_queries
 
-    entry = _scans.get(scan_id)
+    with _scans_lock:
+        entry = _scans.get(scan_id)
     if entry is None:
         return JSONResponse(
             {"error": "Scan not found", "scan_id": scan_id},
@@ -1155,8 +1176,10 @@ async def bulk_page(request: Request) -> HTMLResponse:
     """
     bulk_id = request.query_params.get("id", "")
     bulk_data = None
-    if bulk_id and bulk_id in _bulk_scans:
-        bulk_data = json.dumps(_bulk_scans[bulk_id], default=str)
+    with _bulk_scans_lock:
+        bulk_entry = _bulk_scans.get(bulk_id) if bulk_id else None
+    if bulk_entry is not None:
+        bulk_data = json.dumps(bulk_entry, default=str)
 
     return templates.TemplateResponse(
         "bulk.html",
@@ -1185,12 +1208,13 @@ async def api_bulk_save(request: Request) -> JSONResponse:
     if not bulk_id:
         bulk_id = uuid.uuid4().hex[:12]
 
-    _bulk_scans[bulk_id] = {
-        "bulk_id": bulk_id,
-        "urls": body.get("urls", []),
-        "results": body.get("results", []),
-        "created": body.get("created", datetime.now(timezone.utc).isoformat()),
-    }
+    with _bulk_scans_lock:
+        _bulk_scans[bulk_id] = {
+            "bulk_id": bulk_id,
+            "urls": body.get("urls", []),
+            "results": body.get("results", []),
+            "created": body.get("created", datetime.now(timezone.utc).isoformat()),
+        }
     _save_bulk_cache()
 
     return JSONResponse({"bulk_id": bulk_id})
@@ -1206,7 +1230,8 @@ async def api_bulk_get(bulk_id: str) -> JSONResponse:
     Returns:
         JSON with the bulk session data, or 404.
     """
-    bs = _bulk_scans.get(bulk_id)
+    with _bulk_scans_lock:
+        bs = _bulk_scans.get(bulk_id)
     if bs is None:
         return JSONResponse(
             {"error": "Bulk session not found", "bulk_id": bulk_id},

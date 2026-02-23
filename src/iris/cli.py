@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument(
         "--no-active",
         action="store_true",
-        help="Skip active checks (HTTP fetch, page content) - passive only",
+        help="Lexical-only passive mode (disables network/browser analyzers)",
     )
     parser.add_argument(
         "--no-color",
@@ -63,8 +63,9 @@ def main() -> None:
         from iris.output import console
         console.no_color = True
 
-    # Suppress SSL verification warnings since we intentionally disable it for analysis
-    warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+    # Suppress SSL warnings only when SSL verification is explicitly disabled.
+    if not config.get("requests", {}).get("verify_ssl", True):
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
     # Set up screenshots directory
     project_root = Path(__file__).resolve().parent.parent.parent

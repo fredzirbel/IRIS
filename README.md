@@ -25,7 +25,7 @@ IRIS scans URLs across 8 security dimensions simultaneously — lexical analysis
 - **Copy Report** — one-click clipboard export of full reports; per-field copy buttons for IOCs
 - **Playwright-based Screenshot Capture** with URL banner overlay and redirect detection
 - **Active Link Discovery** — clicks sign-in/login buttons to find hidden credential harvesters
-- **File Download Analysis** — detects automatic downloads, computes SHA-256, queries VirusTotal
+- **File Download Analysis** — detects automatic downloads, computes SHA-1 and SHA-256, queries VirusTotal
 - **Threat Feed Integration** — VirusTotal (severity-aware detection scaling), Google Safe Browsing, AbuseIPDB
 - **Clickable Threat Labels** — VT threat labels link to OSINT search for malware family research
 - **OSINT Link Panel** — one-click links to VirusTotal (including redirect hops), URLScan.io, AbuseIPDB, and more
@@ -85,7 +85,7 @@ docker run -p 8000:8000 --shm-size=2g \
 | **Page Content Analysis** | 15 | Login form detection, brand impersonation keywords, hidden form fields, credential harvesting patterns |
 | **Link Discovery** | 10 | Clicks auth-related buttons on the page, inspects destination for credential forms, cross-domain redirects, and brand spoofing |
 | **Threat Feed Integration** | 0 | Queries VirusTotal, Google Safe Browsing, and AbuseIPDB for findings display; feed impact is scored via blended threat-feed signal below |
-| **Download Analysis** | 15 | Detects auto-downloads, flags suspicious file extensions, computes SHA-256, queries VirusTotal for file reputation |
+| **Download Analysis** | 15 | Detects auto-downloads, flags suspicious file extensions, computes SHA-1 and SHA-256, queries VirusTotal for file reputation |
 
 ## Scoring
 
@@ -111,20 +111,20 @@ Threat feed matches are weighted individually (VirusTotal 40%, Google Safe Brows
 
 ```
                     ┌──────────────────────────────────────────┐
-                    │              FastAPI Web UI               │
-                    │         (SSE streaming results)           │
+                    │              FastAPI Web UI              │
+                    │         (SSE streaming results)          │
                     └──────────────┬───────────────────────────┘
                                    │
                     ┌──────────────▼───────────────────────────┐
-                    │          Scanner Orchestrator             │
-                    │    (ThreadPoolExecutor + Playwright)      │
+                    │          Scanner Orchestrator            │
+                    │    (ThreadPoolExecutor + Playwright)     │
                     └──────────────┬───────────────────────────┘
                                    │
               ┌────────────────────┼────────────────────┐
               │                    │                    │
      ┌────────▼────────┐ ┌────────▼────────┐ ┌────────▼────────┐
-     │  Thread Pool    │ │  Playwright      │ │  Deferred       │
-     │  (concurrent)   │ │  (sequential)    │ │  (post-browser) │
+     │  Thread Pool    │ │  Playwright     │ │  Deferred       │
+     │  (concurrent)   │ │  (sequential)   │ │  (post-browser) │
      ├─────────────────┤ ├─────────────────┤ ├─────────────────┤
      │ URL Lexical     │ │ Page Content    │ │ Download        │
      │ WHOIS/DNS       │ │ Link Discovery  │ │  Analysis       │

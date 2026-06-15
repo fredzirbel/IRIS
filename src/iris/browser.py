@@ -17,6 +17,7 @@ Key features:
 from __future__ import annotations
 
 import logging
+import random
 
 from playwright.sync_api import (
     Browser,
@@ -89,6 +90,10 @@ _INIT_SCRIPT = """
 _TURNSTILE_TIMEOUT_MS = 15000
 _TURNSTILE_POLL_MS = 500
 
+# Viewport used by create_context(); human-behavior simulation stays within it.
+_VIEWPORT_WIDTH = 1280
+_VIEWPORT_HEIGHT = 720
+
 
 def launch_browser(pw: Playwright, url: str) -> Browser:
     """Launch a browser configured for phishing analysis.
@@ -152,6 +157,38 @@ def create_context(browser: Browser) -> BrowserContext:
     return context
 
 
+def _simulate_human_behavior(page: Page) -> None:
+    """Perform brief, bounded human-like interaction on the current page.
+
+    Invisible / score-based challenges (reCAPTCHA v3, Cloudflare Turnstile in
+    managed mode) grade the session on behavioural signals — mouse movement,
+    scrolling, and dwell time. A freshly-automated page with zero interaction
+    scores poorly and is more likely to be challenged or blocked. This injects
+    a few realistic mouse moves (with sub-steps), a small scroll down and
+    partway back up, and short randomised pauses, so the session looks human
+    before we evaluate or screenshot the page.
+
+    Best-effort: any failure (e.g. the page navigated away mid-move) is
+    swallowed so it never breaks the scan.
+
+    Args:
+        page: The Playwright page to interact with.
+    """
+    try:
+        for _ in range(3):
+            x = random.randint(100, _VIEWPORT_WIDTH - 100)
+            y = random.randint(100, _VIEWPORT_HEIGHT - 100)
+            page.mouse.move(x, y, steps=random.randint(5, 15))
+            page.wait_for_timeout(random.randint(80, 220))
+
+        page.mouse.wheel(0, random.randint(300, 600))
+        page.wait_for_timeout(random.randint(200, 500))
+        page.mouse.wheel(0, -random.randint(100, 300))
+        page.wait_for_timeout(random.randint(150, 400))
+    except Exception as exc:  # noqa: BLE001 — behaviour sim must never break a scan
+        logger.debug("Human-behavior simulation skipped: %s", exc)
+
+
 def navigate_with_bypass(
     page: Page,
     url: str,
@@ -181,7 +218,10 @@ def navigate_with_bypass(
         logger.warning("Navigation failed for %s: %s", url, exc)
         return 0
 
-    page.wait_for_timeout(2000)
+    # Brief human-like interaction so invisible / score-based challenges see
+    # realistic signals before evaluation; also lets the page settle.
+    _simulate_human_behavior(page)
+    page.wait_for_timeout(800)
 
     # Check if we landed on a Cloudflare phishing interstitial
     if _is_cloudflare_phishing_block(page):

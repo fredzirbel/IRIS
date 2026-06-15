@@ -51,19 +51,29 @@ def test_detect_swallows_evaluate_errors() -> None:
 # wait_for_manual_captcha_solve
 # ---------------------------------------------------------------------------
 
-def test_wait_returns_true_when_challenge_clears(monkeypatch) -> None:
-    calls = {"n": 0}
-
-    def _fake_detect(_page):
-        calls["n"] += 1
-        return "reCAPTCHA" if calls["n"] < 3 else ""
-
-    monkeypatch.setattr(browser, "detect_interactive_captcha", _fake_detect)
+def test_wait_resumes_on_enter_with_terminal(monkeypatch) -> None:
+    """With an interactive terminal, pressing Enter resumes the scan."""
+    monkeypatch.setattr(browser.sys, "stdin", type("S", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda *_a: "")
     assert browser.wait_for_manual_captcha_solve(_FakePage(), "reCAPTCHA") is True
 
 
-def test_wait_returns_false_on_timeout(monkeypatch) -> None:
-    monkeypatch.setattr(browser, "detect_interactive_captcha", lambda _p: "reCAPTCHA")
+def test_wait_token_fallback_returns_true_when_solved(monkeypatch) -> None:
+    """With no terminal, resume once a solved response token appears."""
+    monkeypatch.setattr(browser.sys, "stdin", type("S", (), {"isatty": lambda self: False})())
+    calls = {"n": 0}
+
+    def _fake_token(_page):
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    monkeypatch.setattr(browser, "_captcha_token_present", _fake_token)
+    assert browser.wait_for_manual_captcha_solve(_FakePage(), "reCAPTCHA") is True
+
+
+def test_wait_token_fallback_times_out(monkeypatch) -> None:
+    monkeypatch.setattr(browser.sys, "stdin", type("S", (), {"isatty": lambda self: False})())
+    monkeypatch.setattr(browser, "_captcha_token_present", lambda _p: False)
     monkeypatch.setattr(browser, "_CAPTCHA_SOLVE_TIMEOUT_MS", 2000)
     monkeypatch.setattr(browser, "_CAPTCHA_POLL_MS", 1000)
     assert browser.wait_for_manual_captcha_solve(_FakePage(), "reCAPTCHA") is False

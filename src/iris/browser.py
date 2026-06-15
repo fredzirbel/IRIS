@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import sys
 
 from playwright.sync_api import (
     Browser,
@@ -99,9 +100,10 @@ _VIEWPORT_HEIGHT = 720
 # Interactive (human-in-the-loop) CAPTCHA solving
 # ---------------------------------------------------------------------------
 # When enabled, an interactive CAPTCHA the tool cannot auto-pass (reCAPTCHA /
-# hCaptcha image challenge, interactive Turnstile) pauses the scan so the
-# operator can solve it in the on-screen browser window; analysis resumes
-# automatically once the challenge clears.
+# hCaptcha checkbox or image challenge, interactive Turnstile) pauses the scan
+# so the operator can solve it in the on-screen browser window; analysis
+# resumes when the operator presses Enter (or, with no terminal, when a solved
+# response token is detected).
 #
 # This is process-global on purpose: it is meant for local / CLI, single-scan
 # use where one human is watching one browser. It is NOT for the concurrent
@@ -109,18 +111,29 @@ _VIEWPORT_HEIGHT = 720
 # remote browser streaming, e.g. noVNC).
 _INTERACTIVE_MODE = False
 
-# How long to wait for a human to solve a challenge before giving up.
+# How long to wait (no-terminal fallback) for a solved token before giving up.
 _CAPTCHA_SOLVE_TIMEOUT_MS = 180_000  # 3 minutes
 _CAPTCHA_POLL_MS = 1000
 
-# Visible-iframe src signatures for interactive CAPTCHA challenge widgets.
-# These match the *challenge* surface (the part requiring human input), not
-# the tiny always-present anchor/checkbox iframe.
+# Visible-iframe src signatures for CAPTCHA widgets. Includes the always-present
+# anchor/checkbox frame (so a plain "I'm not a robot" gate pauses too), not just
+# the image-challenge popup. A size filter in detect_interactive_captcha() skips
+# hidden 0-size frames so we only fire on a rendered widget.
 _CAPTCHA_SIGNATURES = {
-    "reCAPTCHA": ["recaptcha/api2/bframe", "recaptcha/enterprise/bframe"],
+    "reCAPTCHA": [
+        "recaptcha/api2/anchor", "recaptcha/api2/bframe",
+        "recaptcha/enterprise/anchor", "recaptcha/enterprise/bframe",
+    ],
     "hCaptcha": ["hcaptcha.com", "newassets.hcaptcha.com"],
     "Cloudflare Turnstile": ["challenges.cloudflare.com"],
 }
+
+# Names of the hidden field each provider populates once a challenge is solved.
+_CAPTCHA_TOKEN_FIELDS = [
+    "g-recaptcha-response",
+    "h-captcha-response",
+    "cf-turnstile-response",
+]
 
 
 def set_interactive_mode(enabled: bool) -> None:
@@ -134,11 +147,13 @@ def set_interactive_mode(enabled: bool) -> None:
 
 
 def detect_interactive_captcha(page: Page) -> str:
-    """Return the provider name of a *visible* interactive CAPTCHA, or ``""``.
+    """Return the provider name of a *rendered* CAPTCHA widget, or ``""``.
 
-    Looks for a sufficiently-large (i.e. actively displayed) iframe whose src
-    matches a known challenge-widget signature. The small anchor checkbox and
-    hidden challenge frames are ignored via a minimum-size filter.
+    Matches any iframe whose src belongs to a known provider (checkbox/anchor
+    or image-challenge frame) and that is actually rendered. Hidden frames —
+    e.g. the reCAPTCHA image-challenge frame before it is shown — report a
+    zero-size bounding box and are skipped, so this fires on a visible gate
+    rather than on dormant markup.
 
     Args:
         page: The Playwright page to inspect.
@@ -154,8 +169,9 @@ def detect_interactive_captcha(page: Page) -> str:
             for (const f of frames) {{
                 const src = f.src || '';
                 const rect = f.getBoundingClientRect();
-                // Skip invisible / anchor-sized frames.
-                if (rect.width < 100 || rect.height < 100) continue;
+                // Skip hidden / collapsed frames; keep the ~300x78 checkbox
+                // and the larger image-challenge popup.
+                if (rect.width < 50 || rect.height < 20) continue;
                 for (const name in sigs) {{
                     if (sigs[name].some(p => src.includes(p))) return name;
                 }}
@@ -167,37 +183,73 @@ def detect_interactive_captcha(page: Page) -> str:
         return ""
 
 
+def _captcha_token_present(page: Page) -> bool:
+    """Return True if a solved-CAPTCHA response token has been populated.
+
+    Used as the no-terminal resume signal: a populated ``g-recaptcha-response``
+    / ``h-captcha-response`` / ``cf-turnstile-response`` field means the
+    challenge was solved, even though the widget itself stays on the page.
+    """
+    fields_json = json.dumps(_CAPTCHA_TOKEN_FIELDS)
+    try:
+        return bool(page.evaluate(f"""() => {{
+            const names = {fields_json};
+            for (const n of names) {{
+                const el = document.querySelector(
+                    `textarea[name="${{n}}"], input[name="${{n}}"]`
+                );
+                if (el && el.value && el.value.length > 20) return true;
+            }}
+            return false;
+        }}"""))
+    except Exception as exc:
+        logger.debug("CAPTCHA token check failed: %s", exc)
+        return False
+
+
 def wait_for_manual_captcha_solve(page: Page, provider: str) -> bool:
     """Pause the scan while the operator solves a CAPTCHA in the browser window.
 
-    Polls until the visible challenge clears, or until the solve timeout
-    elapses. Intended for interactive (on-screen) local runs.
+    With an interactive terminal, blocks until the operator presses Enter —
+    reliable across every CAPTCHA type (the checkbox widget stays on the page
+    after solving, so waiting for it to "disappear" does not work). Without a
+    terminal (e.g. automation), falls back to polling for a solved response
+    token until the timeout elapses.
 
     Args:
         page: The Playwright page showing the challenge.
         provider: Provider name for operator-facing messaging.
 
     Returns:
-        True if the challenge cleared (solved), False on timeout.
+        True if the operator confirmed / a solved token appeared, False on
+        timeout in the no-terminal fallback.
     """
-    timeout_s = _CAPTCHA_SOLVE_TIMEOUT_MS // 1000
-    logger.warning(
-        "Interactive %s CAPTCHA detected — waiting up to %ds for manual solve",
-        provider, timeout_s,
-    )
-    # Operator-facing prompt (the visible channel for a CLI run).
+    logger.warning("Interactive %s CAPTCHA detected — pausing for manual solve", provider)
     print(
-        f"\n[IRIS] {provider} CAPTCHA detected. Solve it in the browser "
-        f"window — analysis resumes automatically once it clears "
-        f"(waiting up to {timeout_s}s)…",
+        f"\n[IRIS] {provider} CAPTCHA detected in the browser window.",
         flush=True,
     )
 
+    if sys.stdin is not None and sys.stdin.isatty():
+        try:
+            input("[IRIS] Solve it in the window, then press Enter here to continue… ")
+            logger.info("Operator confirmed CAPTCHA solve — resuming")
+            print("[IRIS] Resuming analysis.\n", flush=True)
+            return True
+        except EOFError:
+            pass  # No usable stdin after all — fall through to token polling.
+
+    timeout_s = _CAPTCHA_SOLVE_TIMEOUT_MS // 1000
+    print(
+        f"[IRIS] No interactive terminal; waiting up to {timeout_s}s for a "
+        f"solved token…",
+        flush=True,
+    )
     elapsed = 0
     while elapsed < _CAPTCHA_SOLVE_TIMEOUT_MS:
-        if not detect_interactive_captcha(page):
-            logger.info("CAPTCHA cleared — resuming analysis")
-            print("[IRIS] CAPTCHA cleared — resuming analysis.\n", flush=True)
+        if _captcha_token_present(page):
+            logger.info("Solved CAPTCHA token detected — resuming")
+            print("[IRIS] CAPTCHA solved — resuming analysis.\n", flush=True)
             return True
         page.wait_for_timeout(_CAPTCHA_POLL_MS)
         elapsed += _CAPTCHA_POLL_MS

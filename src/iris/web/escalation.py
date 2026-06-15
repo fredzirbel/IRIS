@@ -12,9 +12,9 @@ Functions:
 
 from __future__ import annotations
 
-import base64
 from typing import Any
 
+from iris.feeds.virustotal import vt_url_id as _vt_url_id_encode
 from iris.web.defang import defang as defang_url
 
 # ---------------------------------------------------------------------------
@@ -25,17 +25,13 @@ from iris.web.defang import defang as defang_url
 def _vt_url_link(url: str) -> str:
     """Return a VirusTotal GUI link for a given URL.
 
-    Uses unpadded base64url encoding, matching the convention in
-    ``iris.web.osint``.
-
     Args:
         url: The raw (fanged) URL to encode.
 
     Returns:
         Full VirusTotal URL analysis link.
     """
-    vt_id = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
-    return f"https://www.virustotal.com/gui/url/{vt_id}"
+    return f"https://www.virustotal.com/gui/url/{_vt_url_id_encode(url)}"
 
 
 def _vt_ip_link(ip: str) -> str:

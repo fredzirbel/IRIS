@@ -10,6 +10,11 @@ from iris.feeds.base import BaseFeed
 from iris.models import FeedResult
 
 
+def vt_url_id(url: str) -> str:
+    """Return the unpadded base64url-encoded URL ID used by VirusTotal's API."""
+    return base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+
+
 class VirusTotalFeed(BaseFeed):
     """Check URLs against VirusTotal's API v3.
 
@@ -41,8 +46,7 @@ class VirusTotalFeed(BaseFeed):
             FeedResult with match status and detection details.
         """
         try:
-            # URL ID is base64url-encoded URL without padding
-            url_id = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+            url_id = vt_url_id(url)
 
             response = requests.get(
                 f"{self.base_url}/urls/{url_id}",

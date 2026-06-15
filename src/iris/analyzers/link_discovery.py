@@ -76,14 +76,6 @@ _SAFE_AUTH_DOMAINS = frozenset({
     "id.atlassian.com",
 })
 
-# Realistic Chrome user-agent (same as screenshot.py).
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
-
-
 class LinkDiscoveryAnalyzer(BaseAnalyzer):
     """Discover and follow auth-related links to detect hidden credential harvesters.
 

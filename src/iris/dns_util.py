@@ -94,19 +94,16 @@ def build_chromium_args(url: str) -> list[str]:
         "--disable-blink-features=AutomationControlled",
     ]
 
-    # Check if system DNS can resolve the hostname
-    needs_override = False
+    # Only add host-resolver-rule when system DNS fails — resolve_hostname
+    # handles DoH fallback internally so we avoid a redundant gethostbyname.
     if hostname:
         try:
             socket.gethostbyname(hostname)
         except (socket.gaierror, OSError):
-            needs_override = True
-
-    if needs_override:
-        ip = resolve_hostname(f"https://{hostname}/")
-        if ip:
-            rule = f"MAP {hostname} {ip}"
-            args.append(f"--host-resolver-rules={rule}")
-            logger.info("Added host-resolver-rule: %s", rule)
+            ip = resolve_hostname(url)
+            if ip:
+                rule = f"MAP {hostname} {ip}"
+                args.append(f"--host-resolver-rules={rule}")
+                logger.info("Added host-resolver-rule: %s", rule)
 
     return args

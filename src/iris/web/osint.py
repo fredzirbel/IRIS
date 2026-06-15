@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import base64
 from urllib.parse import quote
 
 import tldextract
+
+from iris.feeds.virustotal import vt_url_id
 
 
 def generate_osint_links(
@@ -25,14 +26,13 @@ def generate_osint_links(
     Returns:
         A list of dicts with keys: name, url, icon_class, description.
     """
-    # VirusTotal uses an unpadded base64url-encoded URL as its ID
-    vt_url_id = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+    vt_id = vt_url_id(url)
     encoded_url = quote(url, safe="")
 
     links: list[dict[str, str]] = [
         {
             "name": "VirusTotal (URL)",
-            "url": f"https://www.virustotal.com/gui/url/{vt_url_id}",
+            "url": f"https://www.virustotal.com/gui/url/{vt_id}",
             "icon_class": "vt",
             "description": "Multi-engine URL scan results",
         },
@@ -88,11 +88,7 @@ def generate_osint_links(
             # Add VT URL link for each unique redirect hop
             if hop_normalised not in seen_urls:
                 seen_urls.add(hop_normalised)
-                vt_hop_id = (
-                    base64.urlsafe_b64encode(hop.encode())
-                    .decode()
-                    .rstrip("=")
-                )
+                vt_hop_id = vt_url_id(hop)
                 links.append({
                     "name": "VirusTotal (Redirect URL)",
                     "url": f"https://www.virustotal.com/gui/url/{vt_hop_id}",

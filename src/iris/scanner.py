@@ -13,7 +13,7 @@ from typing import Any, Callable
 from playwright.sync_api import Browser, Playwright, sync_playwright
 
 from iris.analyzers import ALL_ANALYZERS
-from iris.browser import launch_browser, set_interactive_mode
+from iris.browser import launch_browser, reset_solved_state, set_interactive_mode
 from iris.dns_util import compute_host_resolver_rule
 from iris.models import (
     AnalyzerResult,
@@ -240,8 +240,10 @@ def scan_url(
         A completed ScanReport with scores and findings.
     """
     # Human-in-the-loop CAPTCHA solving is a process-global browser behaviour;
-    # set it to match this scan's request.
+    # set it to match this scan's request. Reset any solved-CAPTCHA state from a
+    # previous scan so cookies never leak across URLs.
     set_interactive_mode(interactive)
+    reset_solved_state()
 
     passive_allowed_analyzers = {
         # Passive mode is lexical-only: no HTTP/DNS/feed/browser/download calls.

@@ -135,6 +135,81 @@ def test_default_fallback_is_headless(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# solved-state reuse (solve a CAPTCHA once per scan, not per navigation)
+# ---------------------------------------------------------------------------
+
+class _CtxBrowser:
+    """Captures the kwargs passed to new_context."""
+
+    def __init__(self) -> None:
+        self.context_kwargs: list[dict] = []
+
+    def new_context(self, **kwargs):
+        self.context_kwargs.append(kwargs)
+
+        class _Ctx:
+            def add_init_script(self, _s):
+                pass
+
+        return _Ctx()
+
+
+def test_create_context_replays_solved_state_when_interactive(monkeypatch) -> None:
+    browser.set_interactive_mode(True)
+    browser._ctx_tls.solved_state = {"cookies": [{"name": "cf_clearance"}]}
+    try:
+        b = _CtxBrowser()
+        browser.create_context(b)
+    finally:
+        browser.set_interactive_mode(False)
+        browser.reset_solved_state()
+
+    assert b.context_kwargs[0].get("storage_state") == {
+        "cookies": [{"name": "cf_clearance"}]
+    }
+
+
+def test_create_context_ignores_solved_state_when_not_interactive() -> None:
+    browser.set_interactive_mode(False)
+    browser._ctx_tls.solved_state = {"cookies": [{"name": "cf_clearance"}]}
+    try:
+        b = _CtxBrowser()
+        browser.create_context(b)
+    finally:
+        browser.reset_solved_state()
+
+    assert "storage_state" not in b.context_kwargs[0], (
+        "normal scans must stay isolated — no cookie replay"
+    )
+
+
+def test_reset_solved_state_clears_it() -> None:
+    browser._ctx_tls.solved_state = {"cookies": []}
+    browser.reset_solved_state()
+    assert getattr(browser._ctx_tls, "solved_state", None) is None
+
+
+def test_solve_captures_state_for_reuse(monkeypatch) -> None:
+    """Pressing Enter to confirm a solve must stash the context's cookies."""
+    browser.reset_solved_state()
+    monkeypatch.setattr(browser.sys, "stdin", type("S", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda *_a: "")
+
+    captured = {"cookies": [{"name": "session"}]}
+
+    class _Ctx:
+        def storage_state(self):
+            return captured
+
+    class _Page(_FakePage):
+        context = _Ctx()
+
+    assert browser.wait_for_manual_captcha_solve(_Page(), "hCaptcha") is True
+    assert browser._ctx_tls.solved_state == captured
+    browser.reset_solved_state()
+
+
+# ---------------------------------------------------------------------------
 # navigate_with_bypass interactive gating
 # ---------------------------------------------------------------------------
 

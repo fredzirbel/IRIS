@@ -20,6 +20,7 @@ import json
 import logging
 import random
 import sys
+import threading
 
 from playwright.sync_api import (
     Browser,
@@ -135,6 +136,27 @@ _CAPTCHA_TOKEN_FIELDS = [
     "cf-turnstile-response",
 ]
 
+# Thread-local storage_state (cookies/origins) captured after the operator
+# solves a CAPTCHA. A scan navigates the same URL several times, each in a
+# fresh isolated context; replaying this state into later contexts carries the
+# clearance cookie forward so the operator solves the challenge only once
+# instead of being re-prompted per navigation. Only used in interactive mode.
+_ctx_tls = threading.local()
+
+
+def reset_solved_state() -> None:
+    """Clear any captured post-solve storage state (call at scan start)."""
+    _ctx_tls.solved_state = None
+
+
+def _stash_solved_state(page: Page) -> None:
+    """Capture cookies/storage after a solve so later contexts reuse them."""
+    try:
+        _ctx_tls.solved_state = page.context.storage_state()
+        logger.debug("Captured post-solve storage state for reuse this scan")
+    except Exception as exc:
+        logger.debug("Could not capture post-solve storage state: %s", exc)
+
 
 def set_interactive_mode(enabled: bool) -> None:
     """Enable or disable human-in-the-loop CAPTCHA solving (process-global).
@@ -234,6 +256,7 @@ def wait_for_manual_captcha_solve(page: Page, provider: str) -> bool:
         try:
             input("[IRIS] Solve it in the window, then press Enter here to continue… ")
             logger.info("Operator confirmed CAPTCHA solve — resuming")
+            _stash_solved_state(page)
             print("[IRIS] Resuming analysis.\n", flush=True)
             return True
         except EOFError:
@@ -249,6 +272,7 @@ def wait_for_manual_captcha_solve(page: Page, provider: str) -> bool:
     while elapsed < _CAPTCHA_SOLVE_TIMEOUT_MS:
         if _captcha_token_present(page):
             logger.info("Solved CAPTCHA token detected — resuming")
+            _stash_solved_state(page)
             print("[IRIS] CAPTCHA solved — resuming analysis.\n", flush=True)
             return True
         page.wait_for_timeout(_CAPTCHA_POLL_MS)
@@ -322,19 +346,30 @@ def launch_browser(pw: Playwright, url: str, *, interactive: bool = False) -> Br
 def create_context(browser: Browser) -> BrowserContext:
     """Create a browser context with anti-fingerprinting protections.
 
+    In interactive mode, if the operator has already solved a CAPTCHA earlier
+    in this scan, the captured clearance cookies are replayed into the new
+    context so the same challenge is not presented again on later navigations.
+
     Args:
         browser: A launched Browser instance.
 
     Returns:
         A configured BrowserContext.
     """
-    context = browser.new_context(
-        viewport={"width": 1280, "height": 720},
-        ignore_https_errors=True,
-        user_agent=USER_AGENT,
-        locale="en-US",
-        timezone_id="America/New_York",
-    )
+    kwargs: dict = {
+        "viewport": {"width": _VIEWPORT_WIDTH, "height": _VIEWPORT_HEIGHT},
+        "ignore_https_errors": True,
+        "user_agent": USER_AGENT,
+        "locale": "en-US",
+        "timezone_id": "America/New_York",
+    }
+
+    if _INTERACTIVE_MODE:
+        solved_state = getattr(_ctx_tls, "solved_state", None)
+        if solved_state is not None:
+            kwargs["storage_state"] = solved_state
+
+    context = browser.new_context(**kwargs)
     context.add_init_script(_INIT_SCRIPT)
     return context
 

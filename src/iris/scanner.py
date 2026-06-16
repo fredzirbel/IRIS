@@ -22,7 +22,7 @@ from iris.models import (
     RiskCategory,
     ScanReport,
 )
-from iris.scoring import calculate_score
+from iris.scoring import calculate_score, score_breakdown
 from iris.screenshot import capture_multi_screenshots, capture_screenshot
 
 logger = logging.getLogger(__name__)
@@ -393,6 +393,11 @@ def scan_url(
         redirect_chain=scan_meta.get("redirect_chain", []),
     )
 
+    # Per-analyzer contribution breakdown for the analyst-facing table.
+    breakdown = score_breakdown(
+        analyzer_results, scan_meta["feed_results"], config,
+    )
+
     # Emit final score event
     _emit(on_event, "score", {
         "overall_score": overall_score,
@@ -404,6 +409,8 @@ def scan_url(
     _emit(on_event, "classifications", {
         "classifications": [asdict(c) for c in classifications],
     })
+
+    _emit(on_event, "score_breakdown", breakdown)
 
     return ScanReport(
         url=url,
@@ -420,6 +427,7 @@ def scan_url(
         file_download=scan_meta["file_download"],
         multi_screenshots=multi_screenshots,
         threat_classifications=classifications,
+        score_breakdown=breakdown,
     )
 
 

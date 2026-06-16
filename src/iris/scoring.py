@@ -23,6 +23,68 @@ _DEFAULT_FEED_WEIGHTS: dict[str, float] = {
 _THREAT_FEED_ANALYZER_NAME = "Threat Feed Integration"
 
 
+def _composite_parts(
+    results: list[AnalyzerResult],
+    feed_results: list[FeedResult],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute the shared intermediate scoring values.
+
+    Single source of truth for the composite math so the verdict
+    (``calculate_score``) and the analyst-facing breakdown
+    (``score_breakdown``) can never diverge. Mirrors the original Step 1-3
+    pipeline. Assumes at least one completed analyzer.
+
+    Returns:
+        Dict with completed, analyzer_inputs, total_weight, raw_score,
+        feed_signal, analyzer_blend, feed_blend, pre_floor, composite.
+    """
+    completed = [r for r in results if r.status == AnalyzerStatus.COMPLETED]
+
+    scoring_cfg = config.get("scoring", {})
+    blend = scoring_cfg.get("blend", {})
+    analyzer_blend = blend.get("analyzer_weight", 0.45)
+    feed_blend = blend.get("feed_weight", 0.55)
+
+    # Exclude the Threat Feed analyzer from the analyzer average when feeds are
+    # blended separately, so the same evidence is not counted twice.
+    analyzer_inputs = list(completed)
+    if feed_blend > 0 and feed_results:
+        filtered = [
+            r for r in completed if r.analyzer_name != _THREAT_FEED_ANALYZER_NAME
+        ]
+        analyzer_inputs = filtered or list(completed)
+
+    total_weight = sum(r.max_weight for r in analyzer_inputs)
+    raw_score = 0.0
+    if total_weight > 0:
+        for result in analyzer_inputs:
+            raw_score += result.score * (result.max_weight / total_weight)
+
+    feed_signal = _compute_feed_signal(feed_results, config)
+
+    # If no feeds are configured at all, give all weight to analyzers.
+    if len(feed_results) == 0:
+        analyzer_blend = 1.0
+        feed_blend = 0.0
+
+    pre_floor = (raw_score * analyzer_blend) + (feed_signal * feed_blend)
+    pre_floor = min(100.0, max(0.0, pre_floor))
+    composite = _apply_feed_floor(pre_floor, feed_results, config)
+
+    return {
+        "completed": completed,
+        "analyzer_inputs": analyzer_inputs,
+        "total_weight": total_weight,
+        "raw_score": raw_score,
+        "feed_signal": feed_signal,
+        "analyzer_blend": analyzer_blend,
+        "feed_blend": feed_blend,
+        "pre_floor": pre_floor,
+        "composite": composite,
+    }
+
+
 def calculate_score(
     results: list[AnalyzerResult],
     feed_results: list[FeedResult],
@@ -53,62 +115,11 @@ def calculate_score(
             return 100.0, RiskCategory.MALICIOUS, 60.0
         return 0.0, RiskCategory.SAFE, 50.0
 
-    # ------------------------------------------------------------------
-    # Step 1: Raw weighted analyzer score
-    # ------------------------------------------------------------------
-    scoring_cfg = config.get("scoring", {})
-    blend = scoring_cfg.get("blend", {})
-    analyzer_blend = blend.get("analyzer_weight", 0.45)
-    feed_blend = blend.get("feed_weight", 0.55)
+    parts = _composite_parts(results, feed_results, config)
+    composite = parts["composite"]
 
-    # Threat feeds are blended explicitly via feed_signal (Step 2/3). When
-    # feed blending is active, exclude the "Threat Feed Integration" analyzer
-    # from Step 1 so the same feed evidence is not counted twice.
-    analyzer_inputs = list(completed)
-    if feed_blend > 0 and feed_results:
-        analyzer_inputs = [
-            r for r in completed if r.analyzer_name != _THREAT_FEED_ANALYZER_NAME
-        ]
-        if not analyzer_inputs:
-            analyzer_inputs = list(completed)
-
-    total_weight = sum(r.max_weight for r in analyzer_inputs)
-    raw_score = 0.0
-    if total_weight > 0:
-        for result in analyzer_inputs:
-            normalized_weight = result.max_weight / total_weight
-            raw_score += result.score * normalized_weight
-
-    # ------------------------------------------------------------------
-    # Step 2: Graduated feed signal
-    # ------------------------------------------------------------------
-    feed_signal = _compute_feed_signal(feed_results, config)
-
-    # ------------------------------------------------------------------
-    # Step 3: Composite score (blend analyzers + feeds)
-    # ------------------------------------------------------------------
-    # If no feeds are configured at all, give all weight to analyzers.
-    has_any_feed_configured = len(feed_results) > 0
-    if not has_any_feed_configured:
-        analyzer_blend = 1.0
-        feed_blend = 0.0
-
-    composite = (raw_score * analyzer_blend) + (feed_signal * feed_blend)
-    composite = min(100.0, max(0.0, composite))
-
-    # ------------------------------------------------------------------
-    # Step 3b: High-confidence feed floor
-    # ------------------------------------------------------------------
-    # When a threat feed has strong detections (e.g. VT 10+ engines),
-    # the composite should never fall into the "Safe" zone.  New phishing
-    # campaigns are often flagged by VT well before GSB or AbuseIPDB
-    # index them, so a strong single-feed signal is sufficient evidence.
-    composite = _apply_feed_floor(composite, feed_results, config)
-
-    # ------------------------------------------------------------------
-    # Step 4: 3-tier classification
-    # ------------------------------------------------------------------
-    thresholds = scoring_cfg.get("thresholds", {})
+    # 3-tier classification via configurable thresholds.
+    thresholds = config.get("scoring", {}).get("thresholds", {})
     safe_max = thresholds.get("safe", 25)
     malicious_min = thresholds.get("malicious", 60)
 
@@ -119,14 +130,82 @@ def calculate_score(
     else:
         category = RiskCategory.UNCERTAIN
 
-    # ------------------------------------------------------------------
-    # Step 5: Confidence percentage
-    # ------------------------------------------------------------------
     confidence = _calculate_confidence(
-        completed, composite, feed_signal, category, thresholds,
+        completed, composite, parts["feed_signal"], category, thresholds,
     )
 
     return round(composite, 1), category, confidence
+
+
+def score_breakdown(
+    results: list[AnalyzerResult],
+    feed_results: list[FeedResult],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Per-analyzer contribution breakdown for the analyst-facing table.
+
+    Uses the same ``_composite_parts`` math as the verdict. Each completed,
+    non-feed analyzer's contribution to the 0-100 composite is
+    ``score * normalized_weight * analyzer_blend``; threat feeds contribute
+    ``feed_signal * feed_blend`` as one blended line (never averaged as a
+    peer analyzer).
+
+    Returns:
+        Dict with: analyzers (sorted by contribution desc), threat_feeds,
+        analyzer_blend, feed_blend, analyzer_total, feed_total, composite,
+        floor_applied.
+    """
+    completed = [r for r in results if r.status == AnalyzerStatus.COMPLETED]
+    if not completed:
+        composite = 100.0 if any(fr.matched for fr in feed_results) else 0.0
+        return {
+            "analyzers": [], "threat_feeds": None,
+            "analyzer_blend": 1.0, "feed_blend": 0.0,
+            "analyzer_total": 0.0, "feed_total": 0.0,
+            "composite": composite, "floor_applied": None,
+        }
+
+    parts = _composite_parts(results, feed_results, config)
+    total_weight = parts["total_weight"]
+    ab = parts["analyzer_blend"]
+    fb = parts["feed_blend"]
+    feed_signal = parts["feed_signal"]
+
+    analyzers = []
+    for r in parts["analyzer_inputs"]:
+        nw = (r.max_weight / total_weight) if total_weight > 0 else 0.0
+        analyzers.append({
+            "name": r.analyzer_name,
+            "raw_score": round(r.score, 1),
+            "max_weight": round(r.max_weight, 1),
+            "normalized_weight": round(nw, 3),
+            "contribution": round(r.score * nw * ab, 2),
+        })
+    analyzers.sort(key=lambda a: a["contribution"], reverse=True)
+
+    threat_feeds = None
+    if feed_results:
+        threat_feeds = {
+            "feed_signal": round(feed_signal, 1),
+            "contribution": round(feed_signal * fb, 2),
+            "matched_feeds": [fr.feed_name for fr in feed_results if fr.matched],
+        }
+
+    floor_applied = (
+        round(parts["composite"], 1)
+        if parts["composite"] > parts["pre_floor"] + 0.05 else None
+    )
+
+    return {
+        "analyzers": analyzers,
+        "threat_feeds": threat_feeds,
+        "analyzer_blend": ab,
+        "feed_blend": fb,
+        "analyzer_total": round(sum(a["contribution"] for a in analyzers), 2),
+        "feed_total": round(feed_signal * fb, 2),
+        "composite": round(parts["composite"], 1),
+        "floor_applied": floor_applied,
+    }
 
 
 def _compute_feed_signal(

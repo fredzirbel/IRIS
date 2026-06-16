@@ -126,3 +126,4 @@ class ScanReport:
     # Keys: initial, initial_url, cta, cta_url, cta_text
     multi_screenshots: dict = field(default_factory=dict)
     threat_classifications: list[ThreatClassification] = field(default_factory=list)
+    score_breakdown: dict = field(default_factory=dict)

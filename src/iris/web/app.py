@@ -1142,6 +1142,101 @@ async def v1_set_disposition(scan_id: str, request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# Async scan + completion webhook (for the AI agent / SOAR)
+# ---------------------------------------------------------------------------
+
+_jobs: dict[str, dict[str, Any]] = {}
+_jobs_lock = threading.RLock()
+
+
+def _post_webhook(url: str, payload: dict[str, Any]) -> None:
+    """Best-effort POST of a scan result to a callback URL."""
+    timeout = _config.get("notifications", {}).get("webhook_timeout", 10)
+    try:
+        http_requests.post(url, json=payload, timeout=timeout)
+    except Exception as exc:
+        logger.warning("Webhook POST to %s failed: %s", url, exc)
+
+
+def _run_async_job(job_id: str, url: str, callback: str) -> None:
+    """Run a scan on the executor, persist it, and fire the completion webhook."""
+    try:
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        scan_id = uuid.uuid4().hex[:12]
+        extracted = tldextract.extract(url)
+        domain = f"{extracted.domain}.{extracted.suffix}"
+        ip = _resolve_ip(url)
+        report = scan_url(
+            url=url, config=_config, passive_only=False,
+            screenshot_dir=str(_SCREENSHOT_DIR),
+        )
+        report.resolved_ip = ip
+        report.osint_links = generate_osint_links(
+            url, domain, ip, redirect_chain=report.redirect_chain,
+        )
+        sf = Path(report.screenshot_path).name if report.screenshot_path else ""
+        with _scans_lock:
+            _scans[scan_id] = {
+                "scan_id": scan_id, "report": report, "domain": domain,
+                "ip": ip, "screenshot_filename": sf, "disposition": None,
+            }
+        _save_cache()
+        with _scans_lock:
+            result = _report_to_tap(_scans[scan_id], scan_id)
+        with _jobs_lock:
+            _jobs[job_id].update(status="done", scan_id=scan_id, result=result)
+        if callback:
+            _post_webhook(callback, {"job_id": job_id, **result})
+    except Exception as exc:
+        logger.error("Async job %s failed: %s", job_id, exc)
+        with _jobs_lock:
+            _jobs[job_id].update(status="error", error=str(exc))
+        if callback:
+            _post_webhook(callback, {"job_id": job_id, "status": "error", "error": str(exc)})
+
+
+@app.post("/api/v1/scan/async")
+async def v1_scan_async(request: Request) -> JSONResponse:
+    """Queue a scan; returns a job_id. POSTs the result to callback_url on done."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    url = (body.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"error": "URL required"}, status_code=400)
+    callback = (body.get("callback_url") or "").strip() or _config.get(
+        "notifications", {}).get("webhook_url", "")
+
+    job_id = uuid.uuid4().hex[:12]
+    with _jobs_lock:
+        _jobs[job_id] = {"job_id": job_id, "status": "running", "scan_id": None,
+                         "result": None, "error": None}
+    asyncio.get_event_loop().run_in_executor(
+        _scan_executor, _run_async_job, job_id, url, callback,
+    )
+    return JSONResponse({"job_id": job_id, "status": "running"})
+
+
+@app.get("/api/v1/scan/{job_id}")
+async def v1_scan_job(job_id: str) -> JSONResponse:
+    """Poll an async job; also resolves a completed scan_id directly."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job:
+        return JSONResponse(job)
+    with _scans_lock:
+        entry = _scans.get(job_id)
+    if entry:
+        return JSONResponse({
+            "job_id": job_id, "status": "done", "scan_id": job_id,
+            "result": _report_to_tap(entry, job_id),
+        })
+    return JSONResponse({"error": "job not found"}, status_code=404)
+
+
+# ---------------------------------------------------------------------------
 # Report data helper (for Copy Report feature)
 # ---------------------------------------------------------------------------
 

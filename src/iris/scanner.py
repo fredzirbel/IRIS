@@ -13,7 +13,12 @@ from typing import Any, Callable
 from playwright.sync_api import Browser, Playwright, sync_playwright
 
 from iris.analyzers import ALL_ANALYZERS
-from iris.browser import launch_browser, reset_solved_state, set_interactive_mode
+from iris.browser import (
+    launch_browser,
+    reset_solved_state,
+    set_action_notifier,
+    set_interactive_mode,
+)
 from iris.classification import classify
 from iris.dns_util import compute_host_resolver_rule
 from iris.models import (
@@ -245,6 +250,11 @@ def scan_url(
     # previous scan so cookies never leak across URLs.
     set_interactive_mode(interactive)
     reset_solved_state()
+    # Emit "action_required" to the stream when a scan hits a CAPTCHA gate, so
+    # the web UI can desktop-notify the analyst. No-op for headless/agent scans.
+    set_action_notifier(
+        (lambda info: _emit(on_event, "action_required", info)) if on_event else None
+    )
 
     passive_allowed_analyzers = {
         # Passive mode is lexical-only: no HTTP/DNS/feed/browser/download calls.

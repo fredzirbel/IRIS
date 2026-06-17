@@ -258,3 +258,18 @@ def test_navigate_ignores_captcha_when_not_interactive(monkeypatch) -> None:
 
     assert status == 200
     assert solved["called"] is False, "must not pause when interactive mode is off"
+
+
+def test_action_notifier_fires_on_captcha(monkeypatch) -> None:
+    """Even when not interactive, a registered notifier is called on a gate."""
+    _patch_navigation(monkeypatch, captcha_provider="reCAPTCHA")
+    browser.set_interactive_mode(False)
+    seen = []
+    browser.set_action_notifier(lambda info: seen.append(info))
+    try:
+        browser.navigate_with_bypass(_NavPage(), "https://x.test")
+    finally:
+        browser.set_action_notifier(None)
+
+    assert seen and seen[0]["provider"] == "reCAPTCHA"
+    assert seen[0]["kind"] == "captcha"

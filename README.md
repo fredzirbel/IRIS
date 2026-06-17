@@ -241,6 +241,38 @@ is one URL per line on stdout — treat it as live malicious infrastructure.
 | `POST` | `/api/bulk` | Create or update a bulk scan session |
 | `GET` | `/api/bulk/{bulk_id}` | Retrieve a cached bulk scan session |
 
+### v1 TAP API (agent / SOAR)
+
+Stable, machine-friendly URL actions — a SlashNext-style TAP contract. Every
+response includes the **final landing URL**. Each action accepts `{"url": ...}`
+(runs a scan) or `?scan_id=` (reuses an existing scan).
+
+| Method | Endpoint | Returns |
+|--------|----------|---------|
+| `POST` | `/api/v1/url/scan` | Full result: verdict, `suggested_disposition`, score, `final_url`, `text`, `screenshot_url`, classifications |
+| `POST` | `/api/v1/url/text` | `{final_url, text}` — visible text of the final landing page |
+| `POST` | `/api/v1/url/screenshot` | `{final_url, screenshot_url}` |
+| `POST` | `/api/v1/url/threat-intel` | `{final_url, verdict, suggested_disposition, score, confidence, classifications}` |
+| `POST` | `/api/v1/scan/{id}/disposition` | Record analyst disposition `{"disposition": "TP"\|"BTP"\|"FP", "analyst", "note"}` |
+| `POST` | `/api/v1/scan/async` | Queue a scan: `{url, callback_url?}` → `{job_id}`; POSTs the result to the callback on completion |
+| `GET`  | `/api/v1/scan/{job_id}` | Poll an async job's status/result |
+
+The machine **verdict** (Safe/Uncertain/Malicious) maps to a `suggested_disposition`
+(TP / needs review / FP candidate); analysts confirm the real TP/BTP/FP, which
+persists (SQLite) for accuracy reporting. Completion webhooks are configured via
+`notifications.webhook_url` (per-request `callback_url` overrides).
+
+```bash
+# Full TAP result (final_url + text + verdict)
+curl -X POST http://localhost:8080/api/v1/url/scan \
+  -H "Content-Type: application/json" -d '{"url":"https://suspicious-site.xyz"}'
+
+# Fire-and-forget with a completion webhook
+curl -X POST http://localhost:8080/api/v1/scan/async \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://suspicious-site.xyz","callback_url":"https://soar.internal/iris-hook"}'
+```
+
 ### SOAR Integration Example
 
 ```bash

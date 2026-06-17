@@ -158,6 +158,18 @@ def _stash_solved_state(page: Page) -> None:
         logger.debug("Could not capture post-solve storage state: %s", exc)
 
 
+# Optional callback fired when a scan hits a CAPTCHA gate (set per-scan by the
+# scanner so the web stream can emit an "action_required" SSE event). Signature:
+# notifier(info: dict) -> None.
+_action_notifier = None
+
+
+def set_action_notifier(notifier) -> None:
+    """Register (or clear with None) the per-scan analyst-action notifier."""
+    global _action_notifier
+    _action_notifier = notifier
+
+
 def set_interactive_mode(enabled: bool) -> None:
     """Enable or disable human-in-the-loop CAPTCHA solving (process-global).
 
@@ -450,12 +462,21 @@ def navigate_with_bypass(
         else:
             logger.warning("Could not bypass Cloudflare interstitial for %s", url)
 
-    # Human-in-the-loop: if an interactive CAPTCHA the tool cannot auto-pass is
-    # showing and interactive mode is on, let the operator solve it on-screen.
-    if _INTERACTIVE_MODE:
+    # Detect an interactive CAPTCHA gate (for analyst notification and/or solve).
+    provider = ""
+    if _INTERACTIVE_MODE or _action_notifier is not None:
         provider = detect_interactive_captcha(page)
-        if provider:
-            wait_for_manual_captcha_solve(page, provider)
+
+    # Signal that a human is needed (web UI turns this into a desktop notification).
+    if provider and _action_notifier is not None:
+        try:
+            _action_notifier({"kind": "captcha", "provider": provider, "url": url})
+        except Exception as exc:
+            logger.debug("Action notifier failed: %s", exc)
+
+    # Human-in-the-loop: pause for an on-screen solve when interactive mode is on.
+    if provider and _INTERACTIVE_MODE:
+        wait_for_manual_captcha_solve(page, provider)
 
     return status
 

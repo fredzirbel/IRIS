@@ -9,6 +9,12 @@ api_keys:
   # to pull recent URLhaus URLs via the official API instead of scraping.
   urlhaus: ""
 
+# Completion webhook for async scans (POST /api/v1/scan/async). Leave webhook_url
+# empty to disable; a per-request callback_url overrides it.
+notifications:
+  webhook_url: ""
+  webhook_timeout: 10
+
 scoring:
   weights:
     # Analyzer weights are now validated and must sum to 100.

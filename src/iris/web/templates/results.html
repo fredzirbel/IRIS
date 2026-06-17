@@ -200,6 +200,26 @@
     var scanId = "{{ scan_id }}";
     var es = new EventSource("/stream/" + scanId);
 
+    // Ask for desktop-notification permission so we can alert on CAPTCHA gates.
+    try {
+        if (window.Notification && Notification.permission === "default") {
+            Notification.requestPermission();
+        }
+    } catch (e) {}
+
+    es.addEventListener("action_required", function (e) {
+        try {
+            var d = JSON.parse(e.data);
+            var msg = "IRIS needs you — solve the " + (d.provider || "CAPTCHA") +
+                " for " + defang(d.url || "");
+            if (window.Notification && Notification.permission === "granted") {
+                new Notification("IRIS: action required", { body: msg });
+            }
+            var lbl = document.getElementById("score-label");
+            if (lbl) lbl.textContent = "Action required — solve the CAPTCHA in the browser";
+        } catch (err) {}
+    });
+
     /* ---- Report data accumulator for Copy Report ---- */
     var _reportData = {
         url: "", defangedUrl: "", riskCategory: "", confidence: 0,

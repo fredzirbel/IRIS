@@ -1258,6 +1258,29 @@ async def bulk_page(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/api/feeds/import")
+def api_feeds_import(source: str = "urlhaus", limit: int = 15, tag: str = "") -> JSONResponse:
+    """Fetch recent malicious URLs from a threat feed for the Bulk Scan UI.
+
+    Sync def so the blocking HTTP fetch runs in FastAPI's threadpool. Errors
+    are returned in the JSON body (HTTP 200) so the UI can surface them.
+    """
+    from iris.feeds_import import fetch_openphish, fetch_urlhaus, urlhaus_auth_key
+
+    limit = max(1, min(100, limit))
+    try:
+        if source == "openphish":
+            items = fetch_openphish(limit)
+        else:
+            items = fetch_urlhaus(
+                urlhaus_auth_key(_config), limit=limit, online_only=True,
+                tag=(tag or None),
+            )
+        return JSONResponse({"urls": [it["url"] for it in items], "count": len(items)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)})
+
+
 @app.post("/api/bulk")
 async def api_bulk_save(request: Request) -> JSONResponse:
     """Create or update a bulk scan session.

@@ -1822,3 +1822,25 @@ main.container { animation: fadeUp .5s var(--transition-slow) both; }
 }
 tr.feed-row .contrib-bar > span { background: linear-gradient(90deg, var(--cs-orange), var(--cs-red)); }
 tr.feed-row td:first-child summary { color: var(--cs-orange); }
+
+/* ---- Bulk Scan: import-from-feed row ---- */
+.feed-import {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+}
+.feed-input {
+    padding: 0.5rem 0.7rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+}
+.feed-input:focus { outline: none; border-color: var(--accent); }
+.feed-limit { width: 5rem; }
+.feed-tag { flex: 1; min-width: 12rem; }
+.feed-msg { font-size: 0.8rem; color: var(--text-muted); }

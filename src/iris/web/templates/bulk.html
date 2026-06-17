@@ -12,6 +12,22 @@
     <div class="bulk-form">
         <textarea id="bulk-urls" class="bulk-textarea" rows="6"
             placeholder="https://example1.com&#10;https://example2.com&#10;https://example3.com"></textarea>
+
+        <div class="feed-import">
+            <select id="feed-source" class="feed-input" aria-label="Feed source">
+                <option value="urlhaus">URLhaus (malware)</option>
+                <option value="openphish">OpenPhish (phishing)</option>
+            </select>
+            <input type="number" id="feed-limit" class="feed-input feed-limit" value="15"
+                min="1" max="100" aria-label="Number of URLs" title="How many URLs to import">
+            <input type="text" id="feed-tag" class="feed-input feed-tag"
+                placeholder="tag — URLhaus only (e.g. ClearFake)" aria-label="URLhaus tag filter">
+            <button type="button" class="btn btn-secondary" id="feed-import-btn" onclick="importFromFeed()">
+                Import from feed
+            </button>
+            <span id="feed-import-msg" class="feed-msg"></span>
+        </div>
+
         <button type="button" class="btn btn-primary" id="bulk-start" onclick="startBulkScan()">
             Start Bulk Scan
         </button>
@@ -293,6 +309,27 @@
             onScanDone();
         });
     }
+
+    window.importFromFeed = function () {
+        var src = document.getElementById("feed-source").value;
+        var limit = document.getElementById("feed-limit").value || "15";
+        var tag = document.getElementById("feed-tag").value.trim();
+        var btn = document.getElementById("feed-import-btn");
+        var msg = document.getElementById("feed-import-msg");
+        var q = "/api/feeds/import?source=" + encodeURIComponent(src) +
+            "&limit=" + encodeURIComponent(limit) + (tag ? "&tag=" + encodeURIComponent(tag) : "");
+        btn.disabled = true;
+        msg.textContent = "Fetching…";
+        fetch(q).then(function (r) { return r.json(); }).then(function (d) {
+            btn.disabled = false;
+            if (d.error) { msg.textContent = "Error: " + d.error; return; }
+            var urls = d.urls || [];
+            var ta = document.getElementById("bulk-urls");
+            var existing = ta.value.trim();
+            ta.value = (existing ? existing + "\n" : "") + urls.join("\n");
+            msg.textContent = "Added " + urls.length + " URL(s).";
+        }).catch(function (e) { btn.disabled = false; msg.textContent = "Error: " + e; });
+    };
 
     window.startBulkScan = function () {
         var text = document.getElementById("bulk-urls").value.trim();

@@ -1844,6 +1844,13 @@ tr.feed-row td:first-child summary { color: var(--cs-orange); }
 .feed-limit { width: 5rem; }
 .feed-tag { flex: 1; min-width: 12rem; }
 .feed-msg { font-size: 0.8rem; color: var(--text-muted); }
+/* Match the import button's box model to the inputs so heights line up. */
+.feed-import .btn {
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    border: 1px solid transparent;
+}
 
 /* ---- Analyst disposition bar ---- */
 .disposition-bar {

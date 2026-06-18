@@ -27,6 +27,7 @@ from Levenshtein import distance as levenshtein_distance
 
 from iris.analyzers.base import BaseAnalyzer
 from iris.config import get_api_key
+from iris.dns_util import request_with_doh_fallback
 from iris.models import AnalyzerResult, AnalyzerStatus, FileDownloadInfo, Finding
 
 logger = logging.getLogger(__name__)
@@ -121,8 +122,8 @@ class DownloadAnalyzer(BaseAnalyzer):
         content_disp = ""
         is_attachment = False
         try:
-            head_resp = requests.head(
-                url, headers=headers, timeout=timeout,
+            head_resp = request_with_doh_fallback(
+                "HEAD", url, headers=headers, timeout=timeout,
                 verify=verify_ssl, allow_redirects=True,
             )
             content_type = head_resp.headers.get("Content-Type", "").lower().split(";")[0].strip()
@@ -155,8 +156,8 @@ class DownloadAnalyzer(BaseAnalyzer):
         # set the correct binary Content-Type on GET, not HEAD.
         if url_implies_download and not is_download_by_headers:
             try:
-                probe = requests.get(
-                    url, headers=headers, timeout=timeout,
+                probe = request_with_doh_fallback(
+                    "GET", url, headers=headers, timeout=timeout,
                     verify=verify_ssl, stream=True,
                 )
                 probe_ct = probe.headers.get("Content-Type", "").lower().split(";")[0].strip()
@@ -736,8 +737,8 @@ class DownloadAnalyzer(BaseAnalyzer):
             Tuple of (sha1_hex, sha256_hex, size_bytes).
         """
         try:
-            resp = requests.get(
-                url, headers=headers, timeout=timeout,
+            resp = request_with_doh_fallback(
+                "GET", url, headers=headers, timeout=timeout,
                 verify=verify_ssl, stream=True,
             )
             resp.raise_for_status()

@@ -204,6 +204,7 @@
             document.getElementById("bulk-actions").style.display = "";
             document.getElementById("bulk-start").disabled = false;
             document.getElementById("bulk-urls").disabled = false;
+            notifyBulkComplete();
         }
     }
 
@@ -219,9 +220,41 @@
         launchNextScans();
     }
 
+    var MAX_RETRIES = 1;     /* one retry on a transient failure before ERROR */
+    var rowRetries = {};      /* per-row retry counter */
+
     function launchScan(i) {
-        var url = bulkQueue[i];
+        /* Owns the concurrency slot; attemptScan() may run more than once
+           within it (on retry) before the slot is released. */
         activeScans++;
+        rowRetries[i] = 0;
+        attemptScan(i);
+    }
+
+    function handleScanFailure(i) {
+        /* Retry a transient failure once — reusing the held concurrency slot,
+           after a short backoff — before giving up and marking the row ERROR.
+           Common cause: a transient container DNS hiccup on one scan. */
+        if ((rowRetries[i] || 0) < MAX_RETRIES) {
+            rowRetries[i] = (rowRetries[i] || 0) + 1;
+            bulkResults[i] = null;  /* don't let a partial score count as done */
+            var tr = document.getElementById("bulk-row-" + i);
+            if (tr) {
+                tr.children[2].innerHTML =
+                    '<span class="badge" style="background:#3a2a0a;color:#fbbf24;">Retrying…</span>';
+            }
+            setTimeout(function () { attemptScan(i); }, 1200);
+            return;
+        }
+        updateRow(i, "error", null, null, null);
+        bulkResults[i] = {error: true};
+        updateProgress();
+        onScanDone();
+    }
+
+    function attemptScan(i) {
+        var url = bulkQueue[i];
+        bulkResults[i] = null;
         updateRow(i, "scanning", null, null, null);
 
         fetch("/api/scan", {
@@ -232,10 +265,7 @@
         .then(function (r) { return r.json(); })
         .then(function (data) {
             if (!data.scan_id) {
-                updateRow(i, "error", null, null, null);
-                bulkResults[i] = {error: true};
-                updateProgress();
-                onScanDone();
+                handleScanFailure(i);
                 return;
             }
 
@@ -272,10 +302,7 @@
                         onScanDone();
                     })
                     .catch(function () {
-                        updateRow(i, "error", null, null, null);
-                        bulkResults[i] = {error: true};
-                        updateProgress();
-                        onScanDone();
+                        handleScanFailure(i);
                     });
             });
 
@@ -295,18 +322,12 @@
             es.addEventListener("error", function (e) {
                 if (e.data) {
                     es.close();
-                    updateRow(i, "error", null, null, null);
-                    bulkResults[i] = {error: true};
-                    updateProgress();
-                    onScanDone();
+                    handleScanFailure(i);
                 }
             });
         })
         .catch(function () {
-            updateRow(i, "error", null, null, null);
-            bulkResults[i] = {error: true};
-            updateProgress();
-            onScanDone();
+            handleScanFailure(i);
         });
     }
 
@@ -331,9 +352,36 @@
         }).catch(function (e) { btn.disabled = false; msg.textContent = "Error: " + e; });
     };
 
+    function notifyBulkComplete() {
+        /* One desktop ping when the whole batch finishes, only if the analyst
+           has tabbed away. Summarises malicious + error counts. */
+        try {
+            if (!document.hidden) return;
+            if (!window.Notification || Notification.permission !== "granted") return;
+            var mal = 0, errs = 0;
+            for (var k = 0; k < bulkResults.length; k++) {
+                var r = bulkResults[k];
+                if (!r) continue;
+                if (r.error) { errs++; continue; }
+                if ((r.risk_category || "").indexOf("Malicious") === 0) mal++;
+            }
+            var body = bulkQueue.length + " URLs scanned" +
+                (mal ? " · " + mal + " malicious" : "") +
+                (errs ? " · " + errs + " error" + (errs > 1 ? "s" : "") : "");
+            new Notification("IRIS bulk scan complete", { body: body, tag: "iris-bulk-" + bulkId });
+        } catch (e) {}
+    }
+
     window.startBulkScan = function () {
         var text = document.getElementById("bulk-urls").value.trim();
         if (!text) return;
+
+        /* Ask for desktop-notification permission so we can ping on completion. */
+        try {
+            if (window.Notification && Notification.permission === "default") {
+                Notification.requestPermission();
+            }
+        } catch (e) {}
 
         var urls = text.split("\n")
             .map(function (u) { return u.trim(); })

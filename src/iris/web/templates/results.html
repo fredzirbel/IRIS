@@ -2,6 +2,10 @@
 
 {% block title %}IRIS &mdash; Results{% endblock %}
 
+{# Streaming mode embeds the live CAPTCHA-solver browser — give it the wide
+   container so the viewer is large and easy to read. #}
+{% block container_class %}{% if streaming %}container-wide{% endif %}{% endblock %}
+
 {% block content %}
 
 {% if streaming %}
@@ -32,7 +36,7 @@
     </p>
     <iframe id="captcha-solver-iframe" title="Live browser &mdash; solve the CAPTCHA"
             allow="clipboard-read; clipboard-write"
-            style="width:100%;height:70vh;min-height:420px;border:1px solid var(--border,#333);border-radius:6px;background:#000;"></iframe>
+            style="display:block;width:100%;aspect-ratio:16/9;max-height:84vh;border:1px solid var(--border,#333);border-radius:6px;background:#000;"></iframe>
 </section>
 
 <!-- Recommendation (hidden until score arrives) -->

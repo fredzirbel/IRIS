@@ -376,7 +376,9 @@ def _takeover_job(
         browser = launch_browser(pw, url, interactive=True)
 
         kwargs: dict = {
-            "viewport": {"width": _VIEWPORT_WIDTH, "height": _VIEWPORT_HEIGHT},
+            # Let the page fill the maximized window so the analyst sees a large
+            # browser in the noVNC viewer (rather than a small fixed viewport).
+            "no_viewport": True,
             "ignore_https_errors": True,
             "user_agent": USER_AGENT,
             "locale": "en-US",
@@ -499,6 +501,16 @@ def launch_browser(pw: Playwright, url: str, *, interactive: bool = False) -> Br
         "--disable-client-side-phishing-detection",
         "--safebrowsing-disable-download-protection",
     ])
+
+    if interactive:
+        # Fill the virtual display so the live noVNC viewer shows a large,
+        # easy-to-read browser. The container has no window manager, so set the
+        # geometry explicitly rather than relying on --start-maximized alone.
+        base_args.extend([
+            "--window-position=0,0",
+            "--window-size=1920,1080",
+            "--start-maximized",
+        ])
 
     # Off-screen unless the operator needs to see and click the window.
     chrome_args = list(base_args)

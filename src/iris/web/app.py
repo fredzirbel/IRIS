@@ -43,13 +43,24 @@ _PROJECT_ROOT = _WEB_DIR.parent.parent.parent
 _SCREENSHOT_DIR = _PROJECT_ROOT / "screenshots"
 
 # ---------------------------------------------------------------------------
+# Configuration (loaded once at startup)
+# ---------------------------------------------------------------------------
+_config: dict[str, Any] = load_config()
+
+# ---------------------------------------------------------------------------
 # Dedicated scan executor (bounded worker pool)
 # ---------------------------------------------------------------------------
-# Each worker thread gets its own persistent Playwright browser via
-# thread-local storage (see scanner._get_browser).  This allows
-# concurrent scans while respecting Playwright's greenlet-bound API.
+# Each worker thread gets its own persistent (headed Chrome) Playwright browser
+# via thread-local storage (see scanner._get_browser). This allows concurrent
+# scans while respecting Playwright's greenlet-bound API. Concurrency is tunable
+# via bulk.max_concurrent but HARD-CAPPED: each parallel scan is a full Chrome,
+# so unbounded concurrency exhausts RAM/CPU (OOM, timeouts) rather than going
+# faster. See the bulk-concurrency notes in config/default.yaml.
+_MAX_CONCURRENT_SCANS = max(
+    1, min(8, int(_config.get("bulk", {}).get("max_concurrent", 5) or 5))
+)
 _scan_executor = ThreadPoolExecutor(
-    max_workers=3, thread_name_prefix="iris-scan",
+    max_workers=_MAX_CONCURRENT_SCANS, thread_name_prefix="iris-scan",
 )
 
 # ---------------------------------------------------------------------------
@@ -419,11 +430,6 @@ def _save_bulk_cache() -> None:
 # Hydrate from disk on startup
 _load_cache()
 _load_bulk_cache()
-
-# ---------------------------------------------------------------------------
-# Configuration (loaded once at startup)
-# ---------------------------------------------------------------------------
-_config: dict[str, Any] = load_config()
 
 
 def _resolve_ip(url: str) -> str:
@@ -1596,6 +1602,7 @@ async def bulk_page(request: Request) -> HTMLResponse:
         "bulk.html",
         {
             "bulk_restore": bulk_data or "null",
+            "max_concurrent": _MAX_CONCURRENT_SCANS,
         },
     )
 

@@ -120,6 +120,27 @@ def test_build_view_url_omits_password_when_unset(monkeypatch) -> None:
     assert "token=TOK" in url
 
 
+def test_is_human_present_public_accessor() -> None:
+    browser.set_human_present(True)
+    assert browser.is_human_present() is True
+    browser.set_human_present(False)
+    assert browser.is_human_present() is False
+
+
+def test_get_solved_state_roundtrip() -> None:
+    browser.reset_solved_state()
+    assert browser.get_solved_state() is None
+    state = {"cookies": [{"name": "cf_clearance"}]}
+    browser._ctx_tls.solved_state = state
+    assert browser.get_solved_state() == state
+    browser.reset_solved_state()
+
+
+def test_scan_concurrency_is_clamped() -> None:
+    """Bulk concurrency must stay within the hard cap to avoid OOM."""
+    assert 1 <= app._MAX_CONCURRENT_SCANS <= 8
+
+
 def teardown_function(_func) -> None:
     """Reset process/thread state touched by these tests."""
     browser.set_human_present(False)

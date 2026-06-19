@@ -39,6 +39,14 @@ interactive:
   # X display the headed takeover browser renders on (matches the entrypoint).
   display: ":99"
 
+# Bulk Scan concurrency — how many URLs scan in parallel.
+# Each parallel scan runs its own headed Chrome, so this is bound by RAM/CPU,
+# NOT by a code limit: pushing it too high causes OOM/timeouts and SLOWER scans,
+# and more simultaneous CAPTCHA gates contend for the single solver display.
+# Tune to your host; the app hard-caps it at 8.
+bulk:
+  max_concurrent: 5
+
 scoring:
   weights:
     # Analyzer weights are now validated and must sum to 100.

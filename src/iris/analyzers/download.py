@@ -393,19 +393,31 @@ class DownloadAnalyzer(BaseAnalyzer):
             ``content_type``, and optionally ``cloudflare_phishing_block``;
             or ``None`` if nothing useful was detected.
         """
-        from iris.browser import _INIT_SCRIPT, USER_AGENT
+        from iris.browser import (
+            _INIT_SCRIPT,
+            USER_AGENT,
+            get_solved_state,
+            is_human_present,
+            navigate_with_bypass,
+        )
 
         context = None
         try:
             # Create a dedicated context with downloads explicitly enabled.
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                ignore_https_errors=True,
-                user_agent=USER_AGENT,
-                locale="en-US",
-                timezone_id="America/New_York",
-                accept_downloads=True,
-            )
+            # Replay any CAPTCHA clearance already solved earlier in this scan so
+            # a gate solved on the landing page also unlocks the gated download.
+            ctx_kwargs: dict[str, Any] = {
+                "viewport": {"width": 1280, "height": 720},
+                "ignore_https_errors": True,
+                "user_agent": USER_AGENT,
+                "locale": "en-US",
+                "timezone_id": "America/New_York",
+                "accept_downloads": True,
+            }
+            solved_state = get_solved_state()
+            if solved_state:
+                ctx_kwargs["storage_state"] = solved_state
+            context = browser.new_context(**ctx_kwargs)
             context.add_init_script(_INIT_SCRIPT)
             page = context.new_page()
 
@@ -431,13 +443,17 @@ class DownloadAnalyzer(BaseAnalyzer):
 
             page.on("download", _on_download)
 
-            # Navigate — use basic goto instead of navigate_with_bypass so we
-            # can inspect the page ourselves without the bypass consuming time
-            # on a Turnstile that will never solve.
+            # Navigate. When an analyst is present, go through navigate_with_bypass
+            # so a CAPTCHA gating the download triggers the live noVNC takeover and
+            # the page reloads past the gate. In automated/headless runs use a plain
+            # goto so we don't waste the nav budget on a Turnstile that won't solve.
             try:
-                page.goto(
-                    url, wait_until="domcontentloaded", timeout=15000,
-                )
+                if is_human_present():
+                    navigate_with_bypass(page, url, timeout_ms=15000)
+                else:
+                    page.goto(
+                        url, wait_until="domcontentloaded", timeout=15000,
+                    )
             except Exception as exc:
                 logger.debug("Browser navigation failed: %s", exc)
                 page.close()

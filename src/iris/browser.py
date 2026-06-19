@@ -168,6 +168,20 @@ def _get_action_notifier():
 def _solve_timeout_ms() -> int:
     return getattr(_scan_tls, "solve_timeout_ms", _CAPTCHA_SOLVE_TIMEOUT_MS)
 
+
+def is_human_present() -> bool:
+    """Public: True if an analyst is watching this scan and can solve a CAPTCHA live."""
+    return _human_present()
+
+
+def get_solved_state() -> dict | None:
+    """Return the clearance state captured after a CAPTCHA solve this scan, if any.
+
+    Analyzers that build their own browser context (e.g. the download fallback)
+    can replay this so a gate solved earlier in the scan stays unlocked.
+    """
+    return getattr(_ctx_tls, "solved_state", None)
+
 # Visible-iframe src signatures for CAPTCHA widgets. Includes the always-present
 # anchor/checkbox frame (so a plain "I'm not a robot" gate pauses too), not just
 # the image-challenge popup. A size filter in detect_interactive_captcha() skips

@@ -75,5 +75,8 @@ EXPOSE 6080
 # ── Entrypoint: fixed Xvfb display + x11vnc + noVNC, then the app ────────────
 # Replaces the old `xvfb-run --auto-servernum` so the display number is fixed
 # and x11vnc can attach deterministically for the live CAPTCHA-solve takeover.
-RUN chmod +x /app/entrypoint.sh
+# Strip any CR before chmod: a Windows checkout (git autocrlf) can give the
+# script CRLF endings, which make bash fail with "set: pipefail: invalid option
+# name". This keeps the image buildable regardless of the host's git config.
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 CMD ["bash", "/app/entrypoint.sh"]
